@@ -8,41 +8,55 @@ pub(crate) fn ts_parser() -> tree_sitter::Parser {
     p
 }
 
-// TODO: make the parser not recursive and make the AST
-//       into an arena-based structure
-
 pub struct Parser<'s> {
     ts: tree_sitter::Parser,
-    input: &'s str,
+    text: &'s str,
+    chunk: Chunk,
 }
 
-impl<'ts, 's> Parser<'s> {
-    pub fn new() -> Self {
+struct StmtToBeParsed<'ts> {
+    ptr: usize,
+    node: tree_sitter::Node<'ts>,
+}
+
+type UnparsedStmts<'ts> = Vec<StmtToBeParsed<'ts>>;
+
+impl<'s, 'ts> Parser<'s> {
+    pub fn new(text: &'s str) -> Self {
+        let ts = ts_parser();
         Self {
-            ts: ts_parser(),
-            input: "",
+            ts,
+            text,
+            chunk: Chunk::default(),
         }
     }
 
-    pub fn parse(&mut self, text: &'s str) -> Result<Chunk> {
-        self.input = text;
-        let tree = self.ts.parse(self.input, None).ok_or(ParseError::TSError)?;
+    pub fn parse(mut self) -> Result<Chunk> {
+        let tree = self.ts.parse(self.text, None).ok_or(ParseError::TSError)?;
         let root = tree.root_node();
-        let block = self.parse_block(root)?;
-        Ok(Chunk { block })
+        let (block, mut to_be_parsed) = self.parse_block(root)?;
+        self.chunk.block = block;
+
+        while let Some(StmtToBeParsed { ptr, node }) = to_be_parsed.pop() {
+            let (stmt, more_to_parse) = self.parse_stmt(node)?;
+            self.chunk.set_stmt(ptr, stmt);
+            to_be_parsed.extend(more_to_parse);
+        }
+
+        Ok(self.chunk)
     }
 
     fn extract_text(&self, node: tree_sitter::Node<'ts>) -> &'s str {
         let start = node.start_byte();
         let end = node.end_byte();
-        &self.input[start..end]
+        &self.text[start..end]
     }
 
     fn error(&self, node: tree_sitter::Node<'ts>) -> ParseError {
         let start = node.start_position();
         let end = node.end_position();
 
-        let text = self.input;
+        let text = self.text;
 
         let clip_start = std::cmp::max(0, (start.row as i32) - 3) as usize;
         let clip_end = end.row + 3;
@@ -70,27 +84,35 @@ impl<'ts, 's> Parser<'s> {
         ParseError::SyntaxError(start, end, clipped)
     }
 
-    fn parse_block(&self, node: tree_sitter::Node<'ts>) -> Result<Block> {
+    fn parse_block(&mut self, node: tree_sitter::Node<'ts>) -> Result<(Block, UnparsedStmts<'ts>)> {
         let mut stmts = Vec::new();
+        let mut to_be_parsed = Vec::new();
         let cursor = &mut node.walk();
         for child in node.children(cursor) {
-            let stmt = self.parse_stmt(child)?;
-            stmts.push(stmt);
+            let stmt_ptr = self.chunk.alloc();
+            stmts.push(stmt_ptr);
+            to_be_parsed.push(StmtToBeParsed {
+                ptr: stmt_ptr,
+                node: child,
+            });
         }
-        Ok(Block { stmts })
+        Ok((Block { stmts }, to_be_parsed))
     }
 
-    fn parse_stmt(&self, node: tree_sitter::Node<'ts>) -> Result<Stmt> {
+    fn parse_stmt(&mut self, node: tree_sitter::Node<'ts>) -> Result<(Stmt, UnparsedStmts<'ts>)> {
         let kind = node.kind();
         match kind {
-            "local_var_stmt" => Ok(Stmt::Local(self.parse_local(node)?)),
-            "fn_stmt" => Ok(Stmt::FunctionDef(self.parse_function_def(node)?)),
-            "call_stmt" => Ok(Stmt::Call(self.parse_call(node)?)),
+            "local_var_stmt" => Ok((Stmt::Local(self.parse_local(node)?), Vec::new())),
+            "call_stmt" => Ok((Stmt::Call(self.parse_call(node)?), Vec::new())),
+            "fn_stmt" => {
+                let (func, to_be_parsed) = self.parse_function_def(node)?;
+                Ok((Stmt::FunctionDef(func), to_be_parsed))
+            }
             _ => todo!("parse_stmt: {}", kind),
         }
     }
 
-    fn parse_local(&self, node: tree_sitter::Node<'ts>) -> Result<Local> {
+    fn parse_local(&mut self, node: tree_sitter::Node<'ts>) -> Result<Local> {
         let cursor = &mut node.walk();
         let mut bindings = Vec::new();
         let mut init = Vec::new();
@@ -114,12 +136,16 @@ impl<'ts, 's> Parser<'s> {
         Ok(Local { bindings, init })
     }
 
-    fn parse_function_def(&self, node: tree_sitter::Node<'ts>) -> Result<FunctionDef> {
+    fn parse_function_def(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+    ) -> Result<(FunctionDef, UnparsedStmts<'ts>)> {
         let cursor = &mut node.walk();
 
         // vars to fill
         let mut name = String::new();
         let mut body = None;
+        let mut to_be_parsed = Vec::new();
         let mut params = Vec::new();
 
         let mut parsing_params = false;
@@ -136,19 +162,26 @@ impl<'ts, 's> Parser<'s> {
                         todo!("parse_function_def (parsing params): {}", kind);
                     }
                 }
-                "block" => body = Some(self.parse_block(child)?),
+                "block" => {
+                    let (parsed_body, unparsed_stmts) = self.parse_block(child)?;
+                    body = Some(parsed_body);
+                    to_be_parsed.extend(unparsed_stmts);
+                }
                 "end" | "function" => {}
                 _ => todo!("parse_function_def: {}", kind),
             }
         }
-        Ok(FunctionDef {
-            name,
-            params,
-            body: body.ok_or(self.error(node))?,
-        })
+        Ok((
+            FunctionDef {
+                name,
+                params,
+                body: body.ok_or(self.error(node))?,
+            },
+            to_be_parsed,
+        ))
     }
 
-    fn parse_call(&self, node: tree_sitter::Node<'ts>) -> Result<Call> {
+    fn parse_call(&mut self, node: tree_sitter::Node<'ts>) -> Result<Call> {
         let cursor = &mut node.walk();
         let mut expr = None;
         let mut args = Vec::new();
@@ -205,7 +238,7 @@ impl<'ts, 's> Parser<'s> {
         Ok(Binding { name, ty: None })
     }
 
-    fn parse_expr(&self, node: tree_sitter::Node<'ts>) -> Result<Expr> {
+    fn parse_expr(&mut self, node: tree_sitter::Node<'ts>) -> Result<Expr> {
         let kind = node.kind();
         match kind {
             "number" => {
@@ -224,7 +257,7 @@ impl<'ts, 's> Parser<'s> {
                 let end = node.end_byte();
 
                 // lets just make sure lol (only in debug mode)
-                debug_assert!(matches!(&self.input[start..end], "true" | "false"));
+                debug_assert!(matches!(&self.text[start..end], "true" | "false"));
 
                 Ok(Expr::Bool(end - start == 4))
             }
@@ -234,7 +267,7 @@ impl<'ts, 's> Parser<'s> {
         }
     }
 
-    fn parse_var(&self, node: tree_sitter::Node<'ts>) -> Result<Var> {
+    fn parse_var(&mut self, node: tree_sitter::Node<'ts>) -> Result<Var> {
         let mut name = String::new();
         let cursor = &mut node.walk();
         for child in node.children(cursor) {
@@ -248,19 +281,15 @@ impl<'ts, 's> Parser<'s> {
     }
 }
 
-impl Default for Parser<'_> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::vec;
+
     use crate::parser::*;
 
     macro_rules! assert_parse {
         ($source:expr, $expected:expr) => {
-            let ast = Parser::new().parse($source);
+            let ast = Parser::new($source).parse();
             assert_eq!(ast.unwrap(), $expected);
         };
     }
@@ -270,30 +299,29 @@ mod tests {
         assert_parse!(
             "local a = 1\nlocal b, c = 2, 3",
             Chunk {
-                block: Block {
-                    stmts: vec![
-                        Stmt::Local(Local {
-                            bindings: vec![Binding {
-                                name: "a".to_string(),
+                block: Block { stmts: vec![0, 1] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Number(1.0)]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![
+                            Binding {
+                                name: "b".to_string(),
                                 ty: None
-                            }],
-                            init: vec![Expr::Number(1.0)]
-                        }),
-                        Stmt::Local(Local {
-                            bindings: vec![
-                                Binding {
-                                    name: "b".to_string(),
-                                    ty: None
-                                },
-                                Binding {
-                                    name: "c".to_string(),
-                                    ty: None
-                                }
-                            ],
-                            init: vec![Expr::Number(2.0), Expr::Number(3.0)]
-                        })
-                    ]
-                }
+                            },
+                            Binding {
+                                name: "c".to_string(),
+                                ty: None
+                            }
+                        ],
+                        init: vec![Expr::Number(2.0), Expr::Number(3.0)]
+                    }))
+                ]
             }
         );
     }
@@ -303,15 +331,14 @@ mod tests {
         assert_parse!(
             "local a = \"hello\"",
             Chunk {
-                block: Block {
-                    stmts: vec![Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "a".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::String("hello".to_string())]
-                    })]
-                }
+                block: Block { stmts: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "a".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::String("hello".to_string())]
+                }))],
             }
         );
     }
@@ -321,24 +348,23 @@ mod tests {
         assert_parse!(
             "local a = true\nlocal b = false",
             Chunk {
-                block: Block {
-                    stmts: vec![
-                        Stmt::Local(Local {
-                            bindings: vec![Binding {
-                                name: "a".to_string(),
-                                ty: None
-                            }],
-                            init: vec![Expr::Bool(true)]
-                        }),
-                        Stmt::Local(Local {
-                            bindings: vec![Binding {
-                                name: "b".to_string(),
-                                ty: None
-                            }],
-                            init: vec![Expr::Bool(false)]
-                        })
-                    ]
-                }
+                block: Block { stmts: vec![0, 1] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Bool(true)]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "b".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Bool(false)]
+                    }))
+                ]
             }
         );
     }
@@ -348,24 +374,23 @@ mod tests {
         assert_parse!(
             "local a = 1\nlocal b = a",
             Chunk {
-                block: Block {
-                    stmts: vec![
-                        Stmt::Local(Local {
-                            bindings: vec![Binding {
-                                name: "a".to_string(),
-                                ty: None
-                            }],
-                            init: vec![Expr::Number(1.0)]
-                        }),
-                        Stmt::Local(Local {
-                            bindings: vec![Binding {
-                                name: "b".to_string(),
-                                ty: None
-                            }],
-                            init: vec![Expr::Var(Var::Name("a".to_string()))]
-                        })
-                    ]
-                }
+                block: Block { stmts: vec![0, 1] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Number(1.0)]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "b".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Var(Var::Name("a".to_string()))]
+                    }))
+                ]
             }
         );
     }
@@ -377,25 +402,30 @@ mod tests {
             Chunk {
                 block: Block {
                     stmts: vec![
-                        Stmt::FunctionDef(FunctionDef {
-                            name: "f".to_string(),
-                            params: vec![Binding {
-                                name: "n".to_string(),
-                                ty: None
-                            }],
-                            body: Block {
-                                stmts: vec![Stmt::Call(Call {
-                                    func: Expr::Var(Var::Name("print".to_string())),
-                                    args: vec![Expr::Var(Var::Name("n".to_string()))]
-                                })]
-                            }
-                        }),
-                        Stmt::Call(Call {
-                            func: Expr::Var(Var::Name("f".to_string())),
-                            args: vec![Expr::Number(3.0)]
-                        })
-                    ]
-                }
+                        0, // function f(n) print(n) end
+                        1, // f(3)
+                    ],
+                },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        params: vec![Binding {
+                            name: "n".to_string(),
+                            ty: None
+                        }],
+                        body: Block {
+                            stmts: vec![2], // print(n)
+                        }
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("f".to_string())),
+                        args: vec![Expr::Number(3.0)]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Var(Var::Name("n".to_string()))]
+                    }))
+                ]
             }
         );
     }
