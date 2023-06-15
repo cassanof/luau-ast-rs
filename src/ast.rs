@@ -1,5 +1,8 @@
 use crate::errors::ParseError;
 
+/// Represents the status of a statement in the AST.
+/// A status is Some when it is parsed correctly, None when it is removed from the AST by the user,
+/// PreAllocated when it is allocated but not yet parsed, and Error when it is parsed incorrectly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtStatus {
     Some(Stmt),
@@ -33,34 +36,37 @@ pub struct Chunk {
     /// by index as if they were pointers in a linked list. It is an option
     /// in the case that the statement is removed from the AST or it is pre-allocated.
     /// We want to keep the indices the same, so we just replace the statement with None.
-    pub(crate) stmts: Vec<StmtStatus>,
+    pub(crate) stmts: Vec<StmtStatus>, // NOTE: pub(crate) for testing. use methods instead of accessing directly.
 }
 
 impl Chunk {
-    pub fn add_stmt(&mut self, stmt: Stmt) -> usize {
+    /// Allocates and adds a statement to the chunk.
+    pub fn add_stmt(&mut self, stmt_status: StmtStatus) -> usize {
         let i = self.alloc();
-        self.set_stmt(i, stmt);
+        self.set_stmt(i, stmt_status);
         i
     }
 
+    /// Removes a statement from the chunk at the given index. This will not deallocate the
+    /// statement, but rather replace it with None.
+    ///
+    /// # Panics
+    /// Panics if the index is out of bounds.
     pub fn remove_stmt(&mut self, index: usize) {
-        self.stmts[index] = StmtStatus::None;
+        self.set_stmt(index, StmtStatus::None);
     }
 
-    pub fn get_stmt(&self, index: usize) -> Option<&Stmt> {
-        match self.stmts[index] {
-            StmtStatus::Some(ref stmt) => Some(stmt),
-            StmtStatus::None => None,
-            StmtStatus::PreAllocated => {
-                panic!("called `Chunk::get_stmt()` on a `PreAllocated` value")
-            }
-            StmtStatus::Error(ref err) => {
-                panic!("called `Chunk::get_stmt()` on an `Error` value: {:?}", err)
-            }
-        }
+    /// Returns the statement at the given index.
+    ///
+    /// # Panics
+    /// Panics if the index is out of bounds.
+    pub fn get_stmt(&self, index: usize) -> &StmtStatus {
+        &self.stmts[index]
     }
 
-    pub(crate) fn alloc(&mut self) -> usize {
+    /// Allocates space for a statement in the chunk, returning the pointer (as a index) to the space. The
+    /// cell pointed to is set to StmtStatus::PreAllocated.
+    pub fn alloc(&mut self) -> usize {
         // find if there are any holes in the vector
         let mut index = None;
         for (i, stmt) in self.stmts.iter().enumerate() {
@@ -81,8 +87,12 @@ impl Chunk {
         }
     }
 
-    pub(crate) fn set_stmt(&mut self, index: usize, stmt: Stmt) {
-        self.stmts[index] = StmtStatus::Some(stmt);
+    /// Sets the statement at the given index to the given statement.
+    ///
+    /// # Panics
+    /// Panics if the index is out of bounds.
+    pub fn set_stmt(&mut self, index: usize, stmt_status: StmtStatus) {
+        self.stmts[index] = stmt_status;
     }
 }
 

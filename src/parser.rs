@@ -38,9 +38,15 @@ impl<'s, 'ts> Parser<'s> {
         self.chunk.block = block;
 
         while let Some(StmtToBeParsed { ptr, node }) = to_be_parsed.pop() {
-            let (stmt, more_to_parse) = self.parse_stmt(node)?;
-            self.chunk.set_stmt(ptr, stmt);
-            to_be_parsed.extend(more_to_parse);
+            match self.parse_stmt(node) {
+                Ok((stmt, more_to_parse)) => {
+                    self.chunk.set_stmt(ptr, StmtStatus::Some(stmt));
+                    to_be_parsed.extend(more_to_parse);
+                }
+                Err(err) => {
+                    self.chunk.set_stmt(ptr, StmtStatus::Error(err));
+                }
+            }
         }
 
         Ok(self.chunk)
