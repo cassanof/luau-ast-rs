@@ -8,6 +8,9 @@ pub(crate) fn ts_parser() -> tree_sitter::Parser {
     p
 }
 
+// TODO: make the parser not recursive and make the AST
+//       into an arena-based structure
+
 pub struct Parser<'s> {
     ts: tree_sitter::Parser,
     input: &'s str,
@@ -80,37 +83,11 @@ impl<'ts, 's> Parser<'s> {
     fn parse_stmt(&self, node: tree_sitter::Node<'ts>) -> Result<Stmt> {
         let kind = node.kind();
         match kind {
-            "local_var_stmt" => {
-                let local = self.parse_local(node)?;
-                Ok(Stmt::Local(local))
-            }
-            // "assignment_statement" => {
-            // let assign = self.parse_assign(cursor, node)?;
-            // Ok(Stmt::Assign(assign))
-            // }
+            "local_var_stmt" => Ok(Stmt::Local(self.parse_local(node)?)),
+            "fn_stmt" => Ok(Stmt::FunctionDef(self.parse_function_def(node)?)),
+            "call_stmt" => Ok(Stmt::Call(self.parse_call(node)?)),
             _ => todo!("parse_stmt: {}", kind),
         }
-    }
-
-    fn parse_binding(&self, node: tree_sitter::Node<'ts>) -> Result<Binding> {
-        let cursor = &mut node.walk();
-        let mut name = String::new();
-        let mut parsing_type = false;
-        for child in node.children(cursor) {
-            let kind = child.kind();
-            match kind {
-                "name" => name = self.extract_text(child).to_string(),
-                ":" => {
-                    parsing_type = true;
-                }
-                _ if parsing_type => {
-                    // todo!("parse_binding (type delegation): {}", kind);
-                    return Err(self.error(child));
-                }
-                _ => todo!("parse_binding: {}", kind),
-            }
-        }
-        Ok(Binding { name, ty: None })
     }
 
     fn parse_local(&self, node: tree_sitter::Node<'ts>) -> Result<Local> {
@@ -135,6 +112,97 @@ impl<'ts, 's> Parser<'s> {
             }
         }
         Ok(Local { bindings, init })
+    }
+
+    fn parse_function_def(&self, node: tree_sitter::Node<'ts>) -> Result<FunctionDef> {
+        let cursor = &mut node.walk();
+
+        // vars to fill
+        let mut name = String::new();
+        let mut body = None;
+        let mut params = Vec::new();
+
+        let mut parsing_params = false;
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match kind {
+                "name" => name.push_str(self.extract_text(child)),
+                "(" => parsing_params = true,
+                ")" => parsing_params = false,
+                "param" => {
+                    if parsing_params {
+                        params.push(self.parse_binding(child)?);
+                    } else {
+                        todo!("parse_function_def (parsing params): {}", kind);
+                    }
+                }
+                "block" => body = Some(self.parse_block(child)?),
+                "end" | "function" => {}
+                _ => todo!("parse_function_def: {}", kind),
+            }
+        }
+        Ok(FunctionDef {
+            name,
+            params,
+            body: body.ok_or(self.error(node))?,
+        })
+    }
+
+    fn parse_call(&self, node: tree_sitter::Node<'ts>) -> Result<Call> {
+        let cursor = &mut node.walk();
+        let mut expr = None;
+        let mut args = Vec::new();
+
+        let mut parsing_expr = true; // first child is always expr
+        let mut parsing_args = false;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match kind {
+                _ if parsing_expr => {
+                    expr = Some(self.parse_expr(child)?);
+                    parsing_expr = false
+                }
+                "arglist" => {
+                    let cursor = &mut child.walk();
+                    for arg in child.children(cursor) {
+                        let kind = arg.kind();
+                        match kind {
+                            "(" => parsing_args = true,
+                            ")" => parsing_args = false,
+                            _ if parsing_args => args.push(self.parse_expr(arg)?),
+                            "," => {}
+                            _ => todo!("parse_call (arglist): {}", kind),
+                        }
+                    }
+                }
+                _ => todo!("parse_call: {}", kind),
+            }
+        }
+        Ok(Call {
+            func: expr.ok_or(self.error(node))?,
+            args,
+        })
+    }
+
+    fn parse_binding(&self, node: tree_sitter::Node<'ts>) -> Result<Binding> {
+        let cursor = &mut node.walk();
+        let mut name = String::new();
+        let mut parsing_type = false;
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match kind {
+                "name" => name.push_str(self.extract_text(child)),
+                ":" => {
+                    parsing_type = true;
+                }
+                _ if parsing_type => {
+                    todo!("parse_binding (type delegation): {}", kind);
+                }
+                _ => todo!("parse_binding: {}", kind),
+            }
+        }
+        Ok(Binding { name, ty: None })
     }
 
     fn parse_expr(&self, node: tree_sitter::Node<'ts>) -> Result<Expr> {
@@ -172,7 +240,7 @@ impl<'ts, 's> Parser<'s> {
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
-                "name" => name = self.extract_text(child).to_string(),
+                "name" => name.push_str(self.extract_text(child)),
                 _ => todo!("parse_var: {}", kind),
             }
         }
@@ -304,9 +372,31 @@ mod tests {
 
     #[test]
     fn parse_fn_and_call() {
-        let source = "function f()\nprint(\"hi\")\nend\nf()";
-        let mut parser = ts_parser();
-        let tree = parser.parse(source, None).unwrap();
-        println!("{:#?}", tree.root_node().to_sexp());
+        assert_parse!(
+            "function f(n)\nprint(n)\nend\nf(3)",
+            Chunk {
+                block: Block {
+                    stmts: vec![
+                        Stmt::FunctionDef(FunctionDef {
+                            name: "f".to_string(),
+                            params: vec![Binding {
+                                name: "n".to_string(),
+                                ty: None
+                            }],
+                            body: Block {
+                                stmts: vec![Stmt::Call(Call {
+                                    func: Expr::Var(Var::Name("print".to_string())),
+                                    args: vec![Expr::Var(Var::Name("n".to_string()))]
+                                })]
+                            }
+                        }),
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("f".to_string())),
+                            args: vec![Expr::Number(3.0)]
+                        })
+                    ]
+                }
+            }
+        );
     }
 }
