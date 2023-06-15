@@ -29,9 +29,13 @@ impl StmtStatus {
     }
 }
 
+/// The Chunk struct represents the root of the AST. It contains the root of the program in the
+/// block field. All the statements in the AST are stored in the stmts vector. This struct
+/// acts as an arena for the statements in the AST.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Chunk {
     pub block: Block,
+    // TODO: benchmark different data structures for this arena
     /// This vector contains all the statements in the AST. These are referenced
     /// by index as if they were pointers in a linked list. It is an option
     /// in the case that the statement is removed from the AST or it is pre-allocated.
@@ -96,29 +100,36 @@ impl Chunk {
     }
 }
 
+/// A block represents a list of statement. The statements here are pointers to the statements
+/// that live in the chunk.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Block {
-    pub stmts: Vec<usize>,
+    pub stmt_ptrs: Vec<usize>,
 }
 
+/// Represents a bindings in the ast. e.g. the `a` in `local a = 1`, or the
+/// `b: number` in `local b: number = 2`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
     pub name: String,
     pub ty: Option<Type>,
 }
 
+/// Represents a local variable declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Local {
     pub bindings: Vec<Binding>,
     pub init: Vec<Expr>,
 }
 
+/// Represents an assignment statement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assign {
     pub lhs: Vec<Var>,
     pub rhs: Vec<Expr>,
 }
 
+/// Represents a global function definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDef {
     pub name: String,
@@ -126,12 +137,22 @@ pub struct FunctionDef {
     pub body: Block,
 }
 
+/// Represents a function call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Call {
     pub func: Expr,
     pub args: Vec<Expr>,
 }
 
+/// Represents a binary operation. e.g. `a + b`, `a * b`, `a / b`, etc.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BinOp {
+    pub lhs: Box<Expr>,
+    pub op: BinOpType,
+    pub rhs: Box<Expr>,
+}
+
+/// Represents a statement node in the AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     // CompoundOp(Compound),
@@ -153,6 +174,7 @@ pub enum Stmt {
     // Continue(Continue),
 }
 
+/// Represents an expression node in the AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     // \ simple expressions, essentially values /
@@ -168,15 +190,38 @@ pub enum Expr {
     // IfElse(IfElse),
     // StringInterp(StringInterp),
     // TypeAssertion(TypeAssertion),
-    // Binop(Binop),
+    BinOp(BinOp),
     // Unop(Unop),
 }
 
+/// The type of a binary operator.
+/// binop = '+' | '-' | '*' | '/' | '^' | '%' | '..' | '<' | '<=' | '>' | '>=' | '==' | '~=' | 'and' | 'or'
+#[derive(Debug, Clone, PartialEq)]
+pub enum BinOpType {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Pow,
+    Mod,
+    Concat,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
+    And,
+    Or,
+}
+
+/// Represents a type node in the AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     // TODO
 }
 
+/// Represents a variable node in the AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Var {
     Name(String),

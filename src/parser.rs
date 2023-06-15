@@ -102,7 +102,7 @@ impl<'s, 'ts> Parser<'s> {
                 node: child,
             });
         }
-        Ok((Block { stmts }, to_be_parsed))
+        Ok((Block { stmt_ptrs: stmts }, to_be_parsed))
     }
 
     fn parse_stmt(&mut self, node: tree_sitter::Node<'ts>) -> Result<(Stmt, UnparsedStmts<'ts>)> {
@@ -305,7 +305,9 @@ mod tests {
         assert_parse!(
             "local a = 1\nlocal b, c = 2, 3",
             Chunk {
-                block: Block { stmts: vec![0, 1] },
+                block: Block {
+                    stmt_ptrs: vec![0, 1]
+                },
                 stmts: vec![
                     StmtStatus::Some(Stmt::Local(Local {
                         bindings: vec![Binding {
@@ -337,7 +339,7 @@ mod tests {
         assert_parse!(
             "local a = \"hello\"",
             Chunk {
-                block: Block { stmts: vec![0] },
+                block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![StmtStatus::Some(Stmt::Local(Local {
                     bindings: vec![Binding {
                         name: "a".to_string(),
@@ -354,7 +356,9 @@ mod tests {
         assert_parse!(
             "local a = true\nlocal b = false",
             Chunk {
-                block: Block { stmts: vec![0, 1] },
+                block: Block {
+                    stmt_ptrs: vec![0, 1]
+                },
                 stmts: vec![
                     StmtStatus::Some(Stmt::Local(Local {
                         bindings: vec![Binding {
@@ -380,7 +384,9 @@ mod tests {
         assert_parse!(
             "local a = 1\nlocal b = a",
             Chunk {
-                block: Block { stmts: vec![0, 1] },
+                block: Block {
+                    stmt_ptrs: vec![0, 1]
+                },
                 stmts: vec![
                     StmtStatus::Some(Stmt::Local(Local {
                         bindings: vec![Binding {
@@ -407,7 +413,7 @@ mod tests {
             "function f(n)\nprint(n)\nend\nf(3)",
             Chunk {
                 block: Block {
-                    stmts: vec![
+                    stmt_ptrs: vec![
                         0, // function f(n) print(n) end
                         1, // f(3)
                     ],
@@ -420,7 +426,7 @@ mod tests {
                             ty: None
                         }],
                         body: Block {
-                            stmts: vec![2], // print(n)
+                            stmt_ptrs: vec![2], // print(n)
                         }
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
@@ -431,6 +437,102 @@ mod tests {
                         func: Expr::Var(Var::Name("print".to_string())),
                         args: vec![Expr::Var(Var::Name("n".to_string()))]
                     }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn all_binops() {
+        assert_parse!(
+            r#"
+            local plus = 1 + 2
+            local minus = 1 - 2
+            local mul = 1 * 2
+            local div = 1 / 2
+            local mod = 1 % 2
+            local pow = 1 ^ 2
+            local concat = "a" .. "b"
+            local eq = 1 == 2
+            local neq = 1 ~= 2
+            local lt = 1 < 2
+            local gt = 1 > 2
+            local leq = 1 <= 2
+            local geq = 1 >= 2
+            local and = true and false
+            local or = true or false
+            "#,
+            Chunk {
+                block: Block {
+                    stmt_ptrs: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+                },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "plus".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Number(1.0)),
+                            op: BinOpType::Add,
+                            rhs: Box::new(Expr::Number(2.0))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "minus".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Number(1.0)),
+                            op: BinOpType::Sub,
+                            rhs: Box::new(Expr::Number(2.0))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "mul".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Number(1.0)),
+                            op: BinOpType::Mul,
+                            rhs: Box::new(Expr::Number(2.0))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "div".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Number(1.0)),
+                            op: BinOpType::Div,
+                            rhs: Box::new(Expr::Number(2.0))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "mod".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Number(1.0)),
+                            op: BinOpType::Mod,
+                            rhs: Box::new(Expr::Number(2.0))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "pow".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Number(1.0)),
+                            op: BinOpType::Pow,
+                            rhs: Box::new(Expr::Number(2.0))
+                        }),]
+                    })),
                 ]
             }
         );
