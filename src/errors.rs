@@ -1,4 +1,4 @@
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ParseError {
     #[error("tree-sitter error.")]
     TSError,

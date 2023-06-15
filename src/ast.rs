@@ -1,9 +1,11 @@
+use crate::errors::ParseError;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtStatus {
     Some(Stmt),
     None,
     PreAllocated,
-    // TODO: add syntax error node
+    Error(ParseError),
 }
 
 impl StmtStatus {
@@ -16,6 +18,10 @@ impl StmtStatus {
             StmtStatus::PreAllocated => {
                 panic!("called `StmtStatus::unwrap()` on a `PreAllocated` value")
             }
+            StmtStatus::Error(err) => panic!(
+                "called `StmtStatus::unwrap()` on an `Error` value: {:?}",
+                err
+            ),
         }
     }
 }
@@ -47,6 +53,9 @@ impl Chunk {
             StmtStatus::None => None,
             StmtStatus::PreAllocated => {
                 panic!("called `Chunk::get_stmt()` on a `PreAllocated` value")
+            }
+            StmtStatus::Error(ref err) => {
+                panic!("called `Chunk::get_stmt()` on an `Error` value: {:?}", err)
             }
         }
     }
