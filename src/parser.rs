@@ -174,26 +174,40 @@ impl<'s, 'ts> Parser<'s> {
 
     fn parse_fn_body(
         &mut self,
-        // NOTE: the node has to be the "(" of the function def
+        // NOTE: the node has to be the "(" or "<" of the function def
         node: tree_sitter::Node<'ts>,
     ) -> Result<(FunctionBody, UnparsedStmts<'ts>)> {
         let mut params = Vec::new();
         let mut to_be_parsed = Vec::new();
         let mut block = None;
+        let mut generics = Vec::new();
+        let mut ret_ty = None;
 
         enum Step {
+            Generics,
             Params,
             Block,
         }
 
-        let mut step = Step::Params;
+        let mut step = Step::Generics;
 
         for node in (NodeSiblingIter { node: Some(node) }) {
             let kind = node.kind();
             match (kind, &step) {
-                ("(", Step::Params) => {}
-                (")", Step::Params) => step = Step::Block,
+                ("<", Step::Generics) => {}
+                ("generic", Step::Generics) => {
+                    let txt = self.extract_text(node);
+                    generics.push(GenericParam::Name(txt.to_string()));
+                }
+                ("genpack", Step::Generics) => {
+                    let txt = self.extract_text(node.child(0).ok_or_else(|| self.error(node))?);
+                    generics.push(GenericParam::Pack(txt.to_string()));
+                }
+                (">", Step::Generics) => step = Step::Params,
+                (",", Step::Generics | Step::Params) => {}
+                ("(", Step::Generics | Step::Params) => step = Step::Params,
                 ("param", Step::Params) => params.push(self.parse_binding(node)?),
+                (")", Step::Params) => step = Step::Block,
                 ("block", Step::Block) => {
                     let (b, unparsed_stmts) = self.parse_block(node)?;
                     to_be_parsed.extend(unparsed_stmts);
@@ -207,7 +221,12 @@ impl<'s, 'ts> Parser<'s> {
         Ok((
             FunctionBody {
                 params,
-                block: block.ok_or_else(|| self.error(node))?,
+                generics,
+                ret_ty,
+                // there may be no block if the function is empty
+                block: block.unwrap_or_else(|| Block {
+                    stmt_ptrs: Vec::new(),
+                }),
             },
             to_be_parsed,
         ))
@@ -234,7 +253,6 @@ impl<'s, 'ts> Parser<'s> {
         }
 
         let mut step = Step::Name;
-        println!("parse_function_def: {}", node.to_sexp());
 
         for child in node.children(cursor) {
             let kind = child.kind();
@@ -248,7 +266,7 @@ impl<'s, 'ts> Parser<'s> {
                         table = Some(std::mem::replace(&mut name, table_name.to_string()));
                     }
                 },
-                "(" => {
+                "<" | "(" => {
                     let (parsed_body, unparsed_stmts) = self.parse_fn_body(child)?;
                     to_be_parsed.extend(unparsed_stmts);
                     body = Some(parsed_body);
@@ -291,7 +309,7 @@ impl<'s, 'ts> Parser<'s> {
             let kind = child.kind();
             match kind {
                 "name" => name.push_str(self.extract_text(child)),
-                "(" => {
+                "<" | "(" => {
                     let (parsed_body, unparsed_stmts) = self.parse_fn_body(child)?;
                     to_be_parsed.extend(unparsed_stmts);
                     body = Some(parsed_body);
@@ -332,8 +350,8 @@ impl<'s, 'ts> Parser<'s> {
                         match kind {
                             "(" => parsing_args = true,
                             ")" => parsing_args = false,
-                            _ if parsing_args => args.push(self.parse_expr(arg)?),
                             "," => {}
+                            _ if parsing_args => args.push(self.parse_expr(arg)?),
                             _ => todo!("parse_call (arglist): {}", kind),
                         }
                     }
@@ -431,7 +449,7 @@ impl<'s, 'ts> Parser<'s> {
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
-                "name" => name.push_str(self.extract_text(child)),
+                "name" | "vararg" => name.push_str(self.extract_text(child)),
                 ":" => {
                     parsing_type = true;
                 }
@@ -467,6 +485,7 @@ impl<'s, 'ts> Parser<'s> {
 
                 Ok(Expr::Bool(end - start == 4))
             }
+            "vararg" => Ok(Expr::VarArg),
             "exp_wrap" => Ok(Expr::Wrap(Box::new(
                 self.parse_expr(node.child(1).ok_or_else(|| self.error(node))?)?,
             ))),
@@ -754,7 +773,9 @@ mod tests {
                     StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
                         name: "f".to_string(),
                         body: FunctionBody {
+                            ret_ty: None,
                             block: Block { stmt_ptrs: vec![2] },
+                            generics: vec![],
                             params: vec![Binding {
                                 name: "n".to_string(),
                                 ty: None
@@ -777,6 +798,57 @@ mod tests {
     }
 
     #[test]
+    fn parse_fn_multiarg() {
+        assert_parse!(
+            "function f(a, b)\nprint(a)\nprint(b)\nend\nf(3, 4)",
+            Chunk {
+                block: Block {
+                    stmt_ptrs: vec![
+                        0, // function f(a, b) print(a) print(b) end
+                        1, // f(3, 4)
+                    ],
+                },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            ret_ty: None,
+                            block: Block {
+                                stmt_ptrs: vec![2, 3]
+                            },
+                            generics: vec![],
+                            params: vec![
+                                Binding {
+                                    name: "a".to_string(),
+                                    ty: None
+                                },
+                                Binding {
+                                    name: "b".to_string(),
+                                    ty: None
+                                }
+                            ],
+                        },
+                        table: None,
+                        is_method: false
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("f".to_string())),
+                        args: vec![Expr::Number(3.0), Expr::Number(4.0)]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Var(Var::Name("a".to_string()))]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Var(Var::Name("b".to_string()))]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
     fn parse_table_fn() {
         assert_parse!(
             "function t.f(n)\nprint(n)\nend",
@@ -786,6 +858,8 @@ mod tests {
                     StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
                         name: "f".to_string(),
                         body: FunctionBody {
+                            generics: vec![],
+                            ret_ty: None,
                             block: Block { stmt_ptrs: vec![1] },
                             params: vec![Binding {
                                 name: "n".to_string(),
@@ -814,6 +888,8 @@ mod tests {
                     StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
                         name: "f".to_string(),
                         body: FunctionBody {
+                            ret_ty: None,
+                            generics: vec![],
                             block: Block { stmt_ptrs: vec![1] },
                             params: vec![Binding {
                                 name: "n".to_string(),
@@ -847,6 +923,8 @@ mod tests {
                     StmtStatus::Some(Stmt::LocalFunctionDef(LocalFunctionDef {
                         name: "f".to_string(),
                         body: FunctionBody {
+                            ret_ty: None,
+                            generics: vec![],
                             block: Block {
                                 stmt_ptrs: vec![2], // print(n)
                             },
@@ -865,6 +943,54 @@ mod tests {
                         args: vec![Expr::Var(Var::Name("n".to_string()))]
                     }))
                 ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_fn_generics() {
+        assert_parse!(
+            "function f<T, U...>(n) end",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                    name: "f".to_string(),
+                    body: FunctionBody {
+                        ret_ty: None,
+                        generics: vec![
+                            GenericParam::Name("T".to_string()),
+                            GenericParam::Pack("U".to_string())
+                        ],
+                        block: Block { stmt_ptrs: vec![] },
+                        params: vec![Binding {
+                            name: "n".to_string(),
+                            ty: None
+                        }],
+                    },
+                    table: None,
+                    is_method: false
+                })),]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_fn_empty_body() {
+        assert_parse!(
+            "function f() end",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                    name: "f".to_string(),
+                    body: FunctionBody {
+                        ret_ty: None,
+                        generics: vec![],
+                        block: Block { stmt_ptrs: vec![] },
+                        params: vec![]
+                    },
+                    table: None,
+                    is_method: false
+                }))]
             }
         );
     }
@@ -1235,6 +1361,8 @@ mod tests {
                         table: None,
                         is_method: false,
                         body: FunctionBody {
+                            ret_ty: None,
+                            generics: vec![],
                             block: Block {
                                 stmt_ptrs: vec![1, 2, 3]
                             },
@@ -1248,6 +1376,41 @@ mod tests {
                     StmtStatus::Some(Stmt::Break(Break {})),
                     StmtStatus::Some(Stmt::Return(Return { exprs: vec![] })),
                 ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_varargs() {
+        assert_parse!(
+            "function a(...)\nend\nlocal e = ...\n",
+            Chunk {
+                block: Block {
+                    stmt_ptrs: vec![0, 1]
+                },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                        name: "a".to_string(),
+                        table: None,
+                        is_method: false,
+                        body: FunctionBody {
+                            ret_ty: None,
+                            generics: vec![],
+                            block: Block { stmt_ptrs: vec![] },
+                            params: vec![Binding {
+                                name: "...".to_string(),
+                                ty: None
+                            }],
+                        },
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "e".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::VarArg]
+                    }))
+                ],
             }
         );
     }

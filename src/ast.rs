@@ -109,7 +109,9 @@ pub struct Block {
 }
 
 /// Represents a bindings in the ast. e.g. the `a` in `local a = 1`, or the
-/// `b: number` in `local b: number = 2`.
+/// `b: number` in `local b: number = 2`. This binding can also represent
+/// the variadic arguments in a function definition. e.g. `function f(...)`
+/// in that case, the name field is "...".
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
     pub name: String,
@@ -133,8 +135,9 @@ pub struct Assign {
 /// Represents the body of a function.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionBody {
-    // TODO: generic params
     pub params: Vec<Binding>,
+    pub generics: Vec<GenericParam>,
+    pub ret_ty: Option<Type>,
     pub block: Block,
 }
 
@@ -231,7 +234,7 @@ pub enum Expr {
     String(String),
     Nil,
     Bool(bool),
-    Ellipsis,
+    VarArg,
     Var(Var),
     Wrap(Box<Expr>),
     // TableConstructor(TableConstructor),
@@ -291,6 +294,15 @@ pub enum CompOpKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     // TODO
+}
+
+/// Represents a generic type parameter.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GenericParam {
+    /// A type parameter with a name. e.g. `T` in `function foo<T>() end`.
+    Name(String),
+    /// A pack type parameter. e.g. `function foo<T...>() end`.
+    Pack(String),
 }
 
 /// Represents a variable node in the AST.
