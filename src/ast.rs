@@ -5,6 +5,7 @@ use crate::errors::ParseError;
 /// PreAllocated when it is allocated but not yet parsed, and Error when it is parsed incorrectly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtStatus {
+    // TODO: annotate Some(Stmt) with comments (leading, traling)
     Some(Stmt),
     None,
     PreAllocated,
@@ -148,14 +149,29 @@ pub struct Call {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinOp {
     pub lhs: Box<Expr>,
-    pub op: BinOpType,
+    pub op: BinOpKind,
+    pub rhs: Box<Expr>,
+}
+
+/// Represents a unary operation. e.g. `-a`, `not a`, and `#` (length operator).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnOp {
+    pub op: UnOpKind,
+    pub expr: Box<Expr>,
+}
+
+/// Represents a compound operation. e.g. `a += b`, `a -= b`, `a *= b`, etc.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompOp {
+    pub lhs: Var,
+    pub op: CompOpKind,
     pub rhs: Box<Expr>,
 }
 
 /// Represents a statement node in the AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    // CompoundOp(Compound),
+    CompOp(CompOp),
     Call(Call),
     // Do(Do),
     // While(While),
@@ -184,6 +200,7 @@ pub enum Expr {
     Bool(bool),
     Ellipsis,
     Var(Var),
+    Wrap(Box<Expr>),
     // TableConstructor(TableConstructor),
     // Function(Function),
     // PrefixExp(PrefixExp),
@@ -191,13 +208,13 @@ pub enum Expr {
     // StringInterp(StringInterp),
     // TypeAssertion(TypeAssertion),
     BinOp(BinOp),
-    // Unop(Unop),
+    UnOp(UnOp),
 }
 
 /// The type of a binary operator.
 /// binop = '+' | '-' | '*' | '/' | '^' | '%' | '..' | '<' | '<=' | '>' | '>=' | '==' | '~=' | 'and' | 'or'
 #[derive(Debug, Clone, PartialEq)]
-pub enum BinOpType {
+pub enum BinOpKind {
     Add,
     Sub,
     Mul,
@@ -213,6 +230,28 @@ pub enum BinOpType {
     Ne,
     And,
     Or,
+}
+
+/// The type of a unary operator.
+/// unop = '-' | 'not' | '#'
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnOpKind {
+    Neg,
+    Not,
+    Len,
+}
+
+/// The type of a compound operator.
+/// compoundop :: '+=' | '-=' | '*=' | '/=' | '%=' | '^=' | '..='
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompOpKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Pow,
+    Concat,
 }
 
 /// Represents a type node in the AST.

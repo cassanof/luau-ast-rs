@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use crate::ast::*;
 use crate::errors::*;
 use crate::LANG;
@@ -107,15 +109,19 @@ impl<'s, 'ts> Parser<'s> {
 
     fn parse_stmt(&mut self, node: tree_sitter::Node<'ts>) -> Result<(Stmt, UnparsedStmts<'ts>)> {
         let kind = node.kind();
-        match kind {
-            "local_var_stmt" => Ok((Stmt::Local(self.parse_local(node)?), Vec::new())),
-            "call_stmt" => Ok((Stmt::Call(self.parse_call(node)?), Vec::new())),
+        let mut to_be_parsed = Vec::new();
+        let stmt = match kind {
+            "local_var_stmt" => Stmt::Local(self.parse_local(node)?),
             "fn_stmt" => {
-                let (func, to_be_parsed) = self.parse_function_def(node)?;
-                Ok((Stmt::FunctionDef(func), to_be_parsed))
+                let (func, unparsed_stmts) = self.parse_function_def(node)?;
+                to_be_parsed.extend(unparsed_stmts);
+                Stmt::FunctionDef(func)
             }
+            "call_stmt" => Stmt::Call(self.parse_call(node)?),
+            "var_stmt" => Stmt::CompOp(self.parse_compop(node)?),
             _ => todo!("parse_stmt: {}", kind),
-        }
+        };
+        Ok((stmt, to_be_parsed))
     }
 
     fn parse_local(&mut self, node: tree_sitter::Node<'ts>) -> Result<Local> {
@@ -181,7 +187,7 @@ impl<'s, 'ts> Parser<'s> {
             FunctionDef {
                 name,
                 params,
-                body: body.ok_or(self.error(node))?,
+                body: body.ok_or_else(|| self.error(node))?,
             },
             to_be_parsed,
         ))
@@ -219,8 +225,46 @@ impl<'s, 'ts> Parser<'s> {
             }
         }
         Ok(Call {
-            func: expr.ok_or(self.error(node))?,
+            func: expr.ok_or_else(|| self.error(node))?,
             args,
+        })
+    }
+
+    fn parse_compop(&mut self, node: tree_sitter::Node<'ts>) -> Result<CompOp> {
+        let cursor = &mut node.walk();
+        let mut var = None;
+        let mut op = None;
+        let mut expr = None;
+
+        enum Step {
+            Var,
+            Op,
+            Expr,
+        }
+
+        let mut step = Step::Var;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &step) {
+                ("var", Step::Var) => {
+                    var = Some(self.parse_var(child)?);
+                    step = Step::Op;
+                }
+                (_, Step::Op) => {
+                    let txt = self.extract_text(child);
+                    op = Some(CompOpKind::from_str(txt).map_err(|_| self.error(child))?);
+                    step = Step::Expr;
+                }
+                (_, Step::Expr) => expr = Some(self.parse_expr(child)?),
+                _ => todo!("parse_compop: {}", kind),
+            }
+        }
+
+        Ok(CompOp {
+            lhs: var.ok_or_else(|| self.error(node))?,
+            op: op.ok_or_else(|| self.error(node))?,
+            rhs: Box::new(expr.ok_or_else(|| self.error(node))?),
         })
     }
 
@@ -267,8 +311,15 @@ impl<'s, 'ts> Parser<'s> {
 
                 Ok(Expr::Bool(end - start == 4))
             }
+            "exp_wrap" => Ok(Expr::Wrap(Box::new(
+                self.parse_expr(node.child(1).ok_or_else(|| self.error(node))?)?,
+            ))),
             // delegate to parse_var
             "var" => Ok(Expr::Var(self.parse_var(node)?)),
+            // delegate to parse_binop
+            "binexp" => Ok(Expr::BinOp(self.parse_binop(node)?)),
+            // delegate to parse_unop
+            "unexp" => Ok(Expr::UnOp(self.parse_unop(node)?)),
             _ => todo!("parse_expr: {}", kind),
         }
     }
@@ -284,6 +335,131 @@ impl<'s, 'ts> Parser<'s> {
             }
         }
         Ok(Var::Name(name))
+    }
+
+    fn parse_binop(&mut self, node: tree_sitter::Node<'ts>) -> Result<BinOp> {
+        let cursor = &mut node.walk();
+        let mut op = None;
+        let mut lhs = None;
+        let mut rhs = None;
+
+        enum Step {
+            Lhs,
+            Op,
+            Rhs,
+        }
+
+        let mut step = Step::Lhs;
+        for child in node.children(cursor) {
+            match step {
+                Step::Lhs => {
+                    lhs = Some(self.parse_expr(child)?);
+                    step = Step::Op;
+                }
+                Step::Op => {
+                    let txt = self.extract_text(child);
+                    let parsed_op = BinOpKind::from_str(txt).map_err(|_| self.error(node))?;
+                    op = Some(parsed_op);
+                    step = Step::Rhs;
+                }
+                Step::Rhs => {
+                    rhs = Some(self.parse_expr(child)?);
+                }
+            }
+        }
+        Ok(BinOp {
+            lhs: Box::new(lhs.ok_or_else(|| self.error(node))?),
+            op: op.ok_or(self.error(node))?,
+            rhs: Box::new(rhs.ok_or_else(|| self.error(node))?),
+        })
+    }
+
+    fn parse_unop(&mut self, node: tree_sitter::Node<'ts>) -> Result<UnOp> {
+        let cursor = &mut node.walk();
+        let mut op = None;
+        let mut expr = None;
+
+        enum Step {
+            Op,
+            Expr,
+        }
+
+        let mut step = Step::Op;
+        for child in node.children(cursor) {
+            match step {
+                Step::Op => {
+                    let txt = self.extract_text(child);
+                    let parsed_op = UnOpKind::from_str(txt).map_err(|_| self.error(node))?;
+                    op = Some(parsed_op);
+                    step = Step::Expr;
+                }
+                Step::Expr => {
+                    expr = Some(self.parse_expr(child)?);
+                }
+            }
+        }
+        Ok(UnOp {
+            op: op.ok_or_else(|| self.error(node))?,
+            expr: Box::new(expr.ok_or_else(|| self.error(node))?),
+        })
+    }
+}
+
+impl FromStr for BinOpKind {
+    type Err = ();
+
+    /// binop = '+' | '-' | '*' | '/' | '^' | '%' | '..' | '<' | '<=' | '>' | '>=' | '==' | '~=' | 'and' | 'or'
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "+" => Ok(BinOpKind::Add),
+            "-" => Ok(BinOpKind::Sub),
+            "*" => Ok(BinOpKind::Mul),
+            "/" => Ok(BinOpKind::Div),
+            "^" => Ok(BinOpKind::Pow),
+            "%" => Ok(BinOpKind::Mod),
+            ".." => Ok(BinOpKind::Concat),
+            "<" => Ok(BinOpKind::Lt),
+            "<=" => Ok(BinOpKind::Le),
+            ">" => Ok(BinOpKind::Gt),
+            ">=" => Ok(BinOpKind::Ge),
+            "==" => Ok(BinOpKind::Eq),
+            "~=" => Ok(BinOpKind::Ne),
+            "and" => Ok(BinOpKind::And),
+            "or" => Ok(BinOpKind::Or),
+            _ => Err(()),
+        }
+    }
+}
+
+impl FromStr for UnOpKind {
+    type Err = ();
+
+    /// unop = '-' | 'not' | '#'
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "-" => Ok(UnOpKind::Neg),
+            "#" => Ok(UnOpKind::Len),
+            "not" => Ok(UnOpKind::Not),
+            _ => Err(()),
+        }
+    }
+}
+
+impl FromStr for CompOpKind {
+    type Err = ();
+
+    /// compoundop :: '+=' | '-=' | '*=' | '/=' | '%=' | '^=' | '..='
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "+=" => Ok(CompOpKind::Add),
+            "-=" => Ok(CompOpKind::Sub),
+            "*=" => Ok(CompOpKind::Mul),
+            "/=" => Ok(CompOpKind::Div),
+            "%=" => Ok(CompOpKind::Mod),
+            "^=" => Ok(CompOpKind::Pow),
+            "..=" => Ok(CompOpKind::Concat),
+            _ => Err(()),
+        }
     }
 }
 
@@ -474,7 +650,7 @@ mod tests {
                         }],
                         init: vec![Expr::BinOp(BinOp {
                             lhs: Box::new(Expr::Number(1.0)),
-                            op: BinOpType::Add,
+                            op: BinOpKind::Add,
                             rhs: Box::new(Expr::Number(2.0))
                         }),]
                     })),
@@ -485,7 +661,7 @@ mod tests {
                         }],
                         init: vec![Expr::BinOp(BinOp {
                             lhs: Box::new(Expr::Number(1.0)),
-                            op: BinOpType::Sub,
+                            op: BinOpKind::Sub,
                             rhs: Box::new(Expr::Number(2.0))
                         }),]
                     })),
@@ -496,7 +672,7 @@ mod tests {
                         }],
                         init: vec![Expr::BinOp(BinOp {
                             lhs: Box::new(Expr::Number(1.0)),
-                            op: BinOpType::Mul,
+                            op: BinOpKind::Mul,
                             rhs: Box::new(Expr::Number(2.0))
                         }),]
                     })),
@@ -507,7 +683,7 @@ mod tests {
                         }],
                         init: vec![Expr::BinOp(BinOp {
                             lhs: Box::new(Expr::Number(1.0)),
-                            op: BinOpType::Div,
+                            op: BinOpKind::Div,
                             rhs: Box::new(Expr::Number(2.0))
                         }),]
                     })),
@@ -518,7 +694,7 @@ mod tests {
                         }],
                         init: vec![Expr::BinOp(BinOp {
                             lhs: Box::new(Expr::Number(1.0)),
-                            op: BinOpType::Mod,
+                            op: BinOpKind::Mod,
                             rhs: Box::new(Expr::Number(2.0))
                         }),]
                     })),
@@ -529,11 +705,269 @@ mod tests {
                         }],
                         init: vec![Expr::BinOp(BinOp {
                             lhs: Box::new(Expr::Number(1.0)),
-                            op: BinOpType::Pow,
+                            op: BinOpKind::Pow,
                             rhs: Box::new(Expr::Number(2.0))
                         }),]
                     })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "concat".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::String("a".to_string())),
+                            op: BinOpKind::Concat,
+                            rhs: Box::new(Expr::String("b".to_string()))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "eq".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Number(1.0)),
+                            op: BinOpKind::Eq,
+                            rhs: Box::new(Expr::Number(2.0))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "neq".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Number(1.0)),
+                            op: BinOpKind::Ne,
+                            rhs: Box::new(Expr::Number(2.0))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "lt".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Number(1.0)),
+                            op: BinOpKind::Lt,
+                            rhs: Box::new(Expr::Number(2.0))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "gt".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Number(1.0)),
+                            op: BinOpKind::Gt,
+                            rhs: Box::new(Expr::Number(2.0))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "leq".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Number(1.0)),
+                            op: BinOpKind::Le,
+                            rhs: Box::new(Expr::Number(2.0))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "geq".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Number(1.0)),
+                            op: BinOpKind::Ge,
+                            rhs: Box::new(Expr::Number(2.0))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "and".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Bool(true)),
+                            op: BinOpKind::And,
+                            rhs: Box::new(Expr::Bool(false))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "or".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::Bool(true)),
+                            op: BinOpKind::Or,
+                            rhs: Box::new(Expr::Bool(false))
+                        }),]
+                    })),
                 ]
+            }
+        );
+    }
+
+    #[test]
+    fn all_unops() {
+        assert_parse!(
+            r#"
+            local not = not true
+            local neg = - 1
+            local neg_wrap = -(1)
+            local len = #"aaaaa"
+            "#,
+            Chunk {
+                block: Block {
+                    stmt_ptrs: vec![0, 1, 2, 3],
+                },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "not".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::UnOp(UnOp {
+                            op: UnOpKind::Not,
+                            expr: Box::new(Expr::Bool(true))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "neg".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::UnOp(UnOp {
+                            op: UnOpKind::Neg,
+                            expr: Box::new(Expr::Number(1.0))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "neg_wrap".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::UnOp(UnOp {
+                            op: UnOpKind::Neg,
+                            expr: Box::new(Expr::Wrap(Box::new(Expr::Number(1.0))))
+                        }),]
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "len".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::UnOp(UnOp {
+                            op: UnOpKind::Len,
+                            expr: Box::new(Expr::String("aaaaa".to_string()))
+                        }),]
+                    })),
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn all_compops() {
+        assert_parse!(
+            r#"
+            local guinea_pig = 1
+            guinea_pig += 1
+            guinea_pig -= 1
+            guinea_pig *= 1
+            guinea_pig /= 1
+            guinea_pig %= 1
+            guinea_pig ^= 1
+            guinea_pig ..= 1
+            "#,
+            Chunk {
+                block: Block {
+                    stmt_ptrs: vec![0, 1, 2, 3, 4, 5, 6, 7],
+                },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "guinea_pig".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Number(1.0)]
+                    })),
+                    StmtStatus::Some(Stmt::CompOp(CompOp {
+                        lhs: Var::Name("guinea_pig".to_string()),
+                        op: CompOpKind::Add,
+                        rhs: Box::new(Expr::Number(1.0))
+                    })),
+                    StmtStatus::Some(Stmt::CompOp(CompOp {
+                        lhs: Var::Name("guinea_pig".to_string()),
+                        op: CompOpKind::Sub,
+                        rhs: Box::new(Expr::Number(1.0))
+                    })),
+                    StmtStatus::Some(Stmt::CompOp(CompOp {
+                        lhs: Var::Name("guinea_pig".to_string()),
+                        op: CompOpKind::Mul,
+                        rhs: Box::new(Expr::Number(1.0))
+                    })),
+                    StmtStatus::Some(Stmt::CompOp(CompOp {
+                        lhs: Var::Name("guinea_pig".to_string()),
+                        op: CompOpKind::Div,
+                        rhs: Box::new(Expr::Number(1.0))
+                    })),
+                    StmtStatus::Some(Stmt::CompOp(CompOp {
+                        lhs: Var::Name("guinea_pig".to_string()),
+                        op: CompOpKind::Mod,
+                        rhs: Box::new(Expr::Number(1.0))
+                    })),
+                    StmtStatus::Some(Stmt::CompOp(CompOp {
+                        lhs: Var::Name("guinea_pig".to_string()),
+                        op: CompOpKind::Pow,
+                        rhs: Box::new(Expr::Number(1.0))
+                    })),
+                    StmtStatus::Some(Stmt::CompOp(CompOp {
+                        lhs: Var::Name("guinea_pig".to_string()),
+                        op: CompOpKind::Concat,
+                        rhs: Box::new(Expr::Number(1.0))
+                    })),
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_wrap() {
+        assert_parse!(
+            r#"
+        local cray_cray = (1 + (2 * 3) - (1)) / 4
+        "#,
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "cray_cray".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::BinOp(BinOp {
+                        lhs: Box::new(Expr::Wrap(Box::new(Expr::BinOp(BinOp {
+                            lhs: Box::new(Expr::BinOp(BinOp {
+                                lhs: Box::new(Expr::Number(1.0)),
+                                op: BinOpKind::Add,
+                                rhs: Box::new(Expr::Wrap(Box::new(Expr::BinOp(BinOp {
+                                    lhs: Box::new(Expr::Number(2.0)),
+                                    op: BinOpKind::Mul,
+                                    rhs: Box::new(Expr::Number(3.0))
+                                }))))
+                            })),
+                            op: BinOpKind::Sub,
+                            rhs: Box::new(Expr::Wrap(Box::new(Expr::Number(1.0))))
+                        })))),
+                        op: BinOpKind::Div,
+                        rhs: Box::new(Expr::Number(4.0))
+                    }),]
+                })),]
             }
         );
     }
