@@ -204,6 +204,22 @@ pub struct Break;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Continue;
 
+/// Represents a named type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedType {
+    table: Option<String>,
+    name: String,
+    params: Vec<TypeParam>,
+}
+
+/// Represents a function type
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionType {
+    generics: Vec<GenericParam>,
+    params: Vec<Type>,
+    ret_ty: Box<Type>,
+}
+
 /// Represents a statement node in the AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -293,6 +309,49 @@ pub enum CompOpKind {
 /// Represents a type node in the AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
+    // \ compounds, should be their own node but we don't care /
+    /// ...T
+    Variadic(Box<Type>),
+    /// `( T, U )` or `( T, U, ...V )`
+    Pack(Vec<Type>),
+    // \ simple types /
+    /// `( T )`
+    Wrap(Box<Type>),
+    /// `typeof(exp)`
+    TypeOf(Expr),
+    /// `T` or `T<PARAM1, PARAM2>` or `tbl.T`
+    Named(NamedType),
+    /// `{ [T] : U }` or `{ x : T }`
+    Table(Vec<TableProp>),
+    /// `( T ) -> U` or `<T, U...>( T ) -> U`
+    Function(FunctionType),
+    /// `T?`
+    Optional(Box<Type>),
+    /// `T | U`
+    Union(Box<Type>),
+    /// `T & U`
+    Intersection(Box<Type>),
+    // \ literals (singleton) /
+    /// `nil`
+    Nil,
+    /// `"string"`
+    String(String),
+    /// `false` or `true`
+    Bool(bool),
+}
+
+/// Represents a table property or indexer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableProp {
+    /// `[T] : U`
+    Indexer { key: Type, value: Type },
+    /// `x : T`
+    Prop { key: String, value: Type },
+}
+
+/// Represents a type parameter node in the AST.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeParam {
     // TODO
 }
 
