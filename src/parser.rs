@@ -23,6 +23,20 @@ struct StmtToBeParsed<'ts> {
 
 type UnparsedStmts<'ts> = Vec<StmtToBeParsed<'ts>>;
 
+struct NodeSiblingIter<'a> {
+    node: Option<tree_sitter::Node<'a>>,
+}
+
+impl<'a> Iterator for NodeSiblingIter<'a> {
+    type Item = tree_sitter::Node<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.node;
+        self.node = current.and_then(|n| n.next_sibling());
+        current
+    }
+}
+
 impl<'s, 'ts> Parser<'s> {
     pub fn new(text: &'s str) -> Self {
         let ts = ts_parser();
@@ -117,6 +131,11 @@ impl<'s, 'ts> Parser<'s> {
                 to_be_parsed.extend(unparsed_stmts);
                 Stmt::FunctionDef(func)
             }
+            "local_fn_stmt" => {
+                let (func, unparsed_stmts) = self.parse_local_function_def(node)?;
+                to_be_parsed.extend(unparsed_stmts);
+                Stmt::LocalFunctionDef(func)
+            }
             "call_stmt" => Stmt::Call(self.parse_call(node)?),
             "var_stmt" => Stmt::CompOp(self.parse_compop(node)?),
             "ret_stmt" => Stmt::Return(self.parse_return(node)?),
@@ -153,6 +172,47 @@ impl<'s, 'ts> Parser<'s> {
         Ok(Local { bindings, init })
     }
 
+    fn parse_fn_body(
+        &mut self,
+        // NOTE: the node has to be the "(" of the function def
+        node: tree_sitter::Node<'ts>,
+    ) -> Result<(FunctionBody, UnparsedStmts<'ts>)> {
+        let mut params = Vec::new();
+        let mut to_be_parsed = Vec::new();
+        let mut block = None;
+
+        enum Step {
+            Params,
+            Block,
+        }
+
+        let mut step = Step::Params;
+
+        for node in (NodeSiblingIter { node: Some(node) }) {
+            let kind = node.kind();
+            match (kind, &step) {
+                ("(", Step::Params) => {}
+                (")", Step::Params) => step = Step::Block,
+                ("param", Step::Params) => params.push(self.parse_binding(node)?),
+                ("block", Step::Block) => {
+                    let (b, unparsed_stmts) = self.parse_block(node)?;
+                    to_be_parsed.extend(unparsed_stmts);
+                    block = Some(b);
+                }
+                ("end", Step::Block) => break,
+                _ => todo!("parse_fn_body: {}", kind),
+            }
+        }
+
+        Ok((
+            FunctionBody {
+                params,
+                block: block.ok_or_else(|| self.error(node))?,
+            },
+            to_be_parsed,
+        ))
+    }
+
     fn parse_function_def(
         &mut self,
         node: tree_sitter::Node<'ts>,
@@ -160,38 +220,90 @@ impl<'s, 'ts> Parser<'s> {
         let cursor = &mut node.walk();
 
         // vars to fill
+        let mut table = None;
+        let mut is_method = false;
         let mut name = String::new();
         let mut body = None;
         let mut to_be_parsed = Vec::new();
-        let mut params = Vec::new();
 
-        let mut parsing_params = false;
+        enum Step {
+            // we assume that a function def starts with just it's name
+            Name,
+            // the name was actually a table, so now we need to parse the actual name
+            NameWasTable,
+        }
+
+        let mut step = Step::Name;
+        println!("parse_function_def: {}", node.to_sexp());
+
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
-                "name" => name.push_str(self.extract_text(child)),
-                "(" => parsing_params = true,
-                ")" => parsing_params = false,
-                "param" => {
-                    if parsing_params {
-                        params.push(self.parse_binding(child)?);
-                    } else {
-                        todo!("parse_function_def (parsing params): {}", kind);
+                "name" => match step {
+                    Step::Name => {
+                        name.push_str(self.extract_text(child));
                     }
-                }
-                "block" => {
-                    let (parsed_body, unparsed_stmts) = self.parse_block(child)?;
-                    body = Some(parsed_body);
+                    Step::NameWasTable => {
+                        let table_name = self.extract_text(child);
+                        table = Some(std::mem::replace(&mut name, table_name.to_string()));
+                    }
+                },
+                "(" => {
+                    let (parsed_body, unparsed_stmts) = self.parse_fn_body(child)?;
                     to_be_parsed.extend(unparsed_stmts);
+                    body = Some(parsed_body);
+                    break;
                 }
-                "end" | "function" => {}
+                "." => {
+                    step = Step::NameWasTable;
+                }
+                ":" => {
+                    step = Step::NameWasTable;
+                    is_method = true;
+                }
+                "function" => {}
                 _ => todo!("parse_function_def: {}", kind),
             }
         }
         Ok((
             FunctionDef {
+                table,
+                is_method,
                 name,
-                params,
+                body: body.ok_or_else(|| self.error(node))?,
+            },
+            to_be_parsed,
+        ))
+    }
+
+    fn parse_local_function_def(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+    ) -> Result<(LocalFunctionDef, UnparsedStmts<'ts>)> {
+        let cursor = &mut node.walk();
+
+        // vars to fill
+        let mut name = String::new();
+        let mut body = None;
+        let mut to_be_parsed = Vec::new();
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match kind {
+                "name" => name.push_str(self.extract_text(child)),
+                "(" => {
+                    let (parsed_body, unparsed_stmts) = self.parse_fn_body(child)?;
+                    to_be_parsed.extend(unparsed_stmts);
+                    body = Some(parsed_body);
+                    break;
+                }
+                "local" | "function" => {}
+                _ => todo!("parse_function_def: {}", kind),
+            }
+        }
+        Ok((
+            LocalFunctionDef {
+                name,
                 body: body.ok_or_else(|| self.error(node))?,
             },
             to_be_parsed,
@@ -641,12 +753,107 @@ mod tests {
                 stmts: vec![
                     StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
                         name: "f".to_string(),
-                        params: vec![Binding {
-                            name: "n".to_string(),
-                            ty: None
-                        }],
-                        body: Block {
-                            stmt_ptrs: vec![2], // print(n)
+                        body: FunctionBody {
+                            block: Block { stmt_ptrs: vec![2] },
+                            params: vec![Binding {
+                                name: "n".to_string(),
+                                ty: None
+                            }],
+                        },
+                        table: None,
+                        is_method: false
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("f".to_string())),
+                        args: vec![Expr::Number(3.0)]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Var(Var::Name("n".to_string()))]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_table_fn() {
+        assert_parse!(
+            "function t.f(n)\nprint(n)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            block: Block { stmt_ptrs: vec![1] },
+                            params: vec![Binding {
+                                name: "n".to_string(),
+                                ty: None
+                            }],
+                        },
+                        table: Some("t".to_string()),
+                        is_method: false
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Var(Var::Name("n".to_string()))]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_method_fn() {
+        assert_parse!(
+            "function t:f(n)\nprint(self)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            block: Block { stmt_ptrs: vec![1] },
+                            params: vec![Binding {
+                                name: "n".to_string(),
+                                ty: None
+                            }],
+                        },
+                        table: Some("t".to_string()),
+                        is_method: true
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Var(Var::Name("self".to_string()))]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_local_fn_and_call() {
+        assert_parse!(
+            "local function f(n)\nprint(n)\nend\nf(3)",
+            Chunk {
+                block: Block {
+                    stmt_ptrs: vec![
+                        0, // function f(n) print(n) end
+                        1, // f(3)
+                    ],
+                },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::LocalFunctionDef(LocalFunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            block: Block {
+                                stmt_ptrs: vec![2], // print(n)
+                            },
+                            params: vec![Binding {
+                                name: "n".to_string(),
+                                ty: None
+                            }],
                         }
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
@@ -1025,12 +1232,16 @@ mod tests {
                 stmts: vec![
                     StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
                         name: "a".to_string(),
-                        params: vec![Binding {
-                            name: "n".to_string(),
-                            ty: None
-                        }],
-                        body: Block {
-                            stmt_ptrs: vec![1, 2, 3]
+                        table: None,
+                        is_method: false,
+                        body: FunctionBody {
+                            block: Block {
+                                stmt_ptrs: vec![1, 2, 3]
+                            },
+                            params: vec![Binding {
+                                name: "n".to_string(),
+                                ty: None
+                            }],
                         },
                     })),
                     StmtStatus::Some(Stmt::Continue(Continue {})),

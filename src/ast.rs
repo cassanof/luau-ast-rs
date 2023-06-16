@@ -130,12 +130,31 @@ pub struct Assign {
     pub exprs: Vec<Expr>,
 }
 
+/// Represents the body of a function.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionBody {
+    // TODO: generic params
+    pub params: Vec<Binding>,
+    pub block: Block,
+}
+
 /// Represents a global function definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDef {
+    /// The table that is being assigned to. e.g. `a` in `a.b = function() end`.
+    pub table: Option<String>,
+    /// Whether the function is a method. e.g. `function a:b() end` is a method.
+    pub is_method: bool,
+    /// The name of the function. e.g. `a` in `function a() end`.
     pub name: String,
-    pub params: Vec<Binding>,
-    pub body: Block,
+    pub body: FunctionBody,
+}
+
+/// Represents a local function definition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalFunctionDef {
+    pub name: String,
+    pub body: FunctionBody,
 }
 
 /// Represents a function call.
@@ -194,7 +213,7 @@ pub enum Stmt {
     // For(For),
     // ForIn(ForIn),
     FunctionDef(FunctionDef),
-    // LocalFunction(LocalFunction),
+    LocalFunctionDef(LocalFunctionDef),
     Local(Local),
     Assign(Assign),
     // TypeDef(TypeDef),
