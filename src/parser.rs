@@ -119,6 +119,11 @@ impl<'s, 'ts> Parser<'s> {
             }
             "call_stmt" => Stmt::Call(self.parse_call(node)?),
             "var_stmt" => Stmt::CompOp(self.parse_compop(node)?),
+            "ret_stmt" => Stmt::Return(self.parse_return(node)?),
+            "assign_stmt" => Stmt::Assign(self.parse_assign(node)?),
+            // these don't need to be parsed separately
+            "break_stmt" => Stmt::Break(Break {}),
+            "continue_stmt" => Stmt::Continue(Continue {}),
             _ => todo!("parse_stmt: {}", kind),
         };
         Ok((stmt, to_be_parsed))
@@ -266,6 +271,45 @@ impl<'s, 'ts> Parser<'s> {
             op: op.ok_or_else(|| self.error(node))?,
             rhs: Box::new(expr.ok_or_else(|| self.error(node))?),
         })
+    }
+
+    fn parse_return(&mut self, node: tree_sitter::Node<'ts>) -> Result<Return> {
+        let cursor = &mut node.walk();
+        let mut exprs = Vec::new();
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match kind {
+                "return" => {}
+                _ => exprs.push(self.parse_expr(child)?),
+            }
+        }
+        Ok(Return { exprs })
+    }
+
+    fn parse_assign(&mut self, node: tree_sitter::Node<'ts>) -> Result<Assign> {
+        let cursor = &mut node.walk();
+        let mut vars = Vec::new();
+        let mut exprs = Vec::new();
+
+        enum Step {
+            Vars,
+            Exprs,
+        }
+
+        let mut step = Step::Vars;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &step) {
+                ("var", Step::Vars) => vars.push(self.parse_var(child)?),
+                ("=", Step::Vars) => step = Step::Exprs,
+                (",", _) => {}
+                (_, Step::Exprs) => exprs.push(self.parse_expr(child)?),
+                _ => return Err(self.error(child)),
+            }
+        }
+
+        Ok(Assign { vars, exprs })
     }
 
     fn parse_binding(&self, node: tree_sitter::Node<'ts>) -> Result<Binding> {
@@ -968,6 +1012,60 @@ mod tests {
                         rhs: Box::new(Expr::Number(4.0))
                     }),]
                 })),]
+            }
+        );
+    }
+
+    #[test]
+    fn test_return_break_continue() {
+        assert_parse!(
+            "function a(n)\ncontinue\nbreak\nreturn\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                        name: "a".to_string(),
+                        params: vec![Binding {
+                            name: "n".to_string(),
+                            ty: None
+                        }],
+                        body: Block {
+                            stmt_ptrs: vec![1, 2, 3]
+                        },
+                    })),
+                    StmtStatus::Some(Stmt::Continue(Continue {})),
+                    StmtStatus::Some(Stmt::Break(Break {})),
+                    StmtStatus::Some(Stmt::Return(Return { exprs: vec![] })),
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_assignment() {
+        assert_parse!(
+            "local a = 1\na = false\na, b = 1, 2",
+            Chunk {
+                block: Block {
+                    stmt_ptrs: vec![0, 1, 2],
+                },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Number(1.0)]
+                    })),
+                    StmtStatus::Some(Stmt::Assign(Assign {
+                        vars: vec![Var::Name("a".to_string())],
+                        exprs: vec![Expr::Bool(false)]
+                    })),
+                    StmtStatus::Some(Stmt::Assign(Assign {
+                        vars: vec![Var::Name("a".to_string()), Var::Name("b".to_string())],
+                        exprs: vec![Expr::Number(1.0), Expr::Number(2.0)]
+                    })),
+                ]
             }
         );
     }

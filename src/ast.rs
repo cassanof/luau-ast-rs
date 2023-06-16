@@ -126,8 +126,8 @@ pub struct Local {
 /// Represents an assignment statement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assign {
-    pub lhs: Vec<Var>,
-    pub rhs: Vec<Expr>,
+    pub vars: Vec<Var>,
+    pub exprs: Vec<Expr>,
 }
 
 /// Represents a global function definition.
@@ -168,6 +168,20 @@ pub struct CompOp {
     pub rhs: Box<Expr>,
 }
 
+/// Represents a return statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Return {
+    pub exprs: Vec<Expr>,
+}
+
+/// Represents a break statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Break;
+
+/// Represents a continue statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Continue;
+
 /// Represents a statement node in the AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -182,12 +196,12 @@ pub enum Stmt {
     FunctionDef(FunctionDef),
     // LocalFunction(LocalFunction),
     Local(Local),
-    // Assign(Assign),
+    Assign(Assign),
     // TypeDef(TypeDef),
     // \ These under are technically "last statements", but we don't care about that in AST form /
-    // Return(Return),
-    // Break(Break),
-    // Continue(Continue),
+    Return(Return),
+    Break(Break),
+    Continue(Continue),
 }
 
 /// Represents an expression node in the AST.
