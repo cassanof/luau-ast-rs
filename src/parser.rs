@@ -133,7 +133,7 @@ impl<'s, 'ts> Parser<'s> {
     ) -> Result<Stmt> {
         let kind = node.kind();
 
-        /// parses and adds unparsed statements to `unp`
+        // macro for tidyness
         macro_rules! ez_parse {
             ($parse_fn:ident, $stmt:expr) => {{
                 let stmt = self.$parse_fn(node, unp)?;
@@ -143,7 +143,7 @@ impl<'s, 'ts> Parser<'s> {
 
         let stmt = match kind {
             // \ all these statements create additional scopes /
-            "local_var_stmt" => Stmt::Local(self.parse_local(node)?),
+            "local_var_stmt" => ez_parse!(parse_local, Stmt::Local),
             "fn_stmt" => ez_parse!(parse_function_def, Stmt::FunctionDef),
             "local_fn_stmt" => ez_parse!(parse_local_function_def, Stmt::LocalFunctionDef),
             "do_stmt" => ez_parse!(parse_do, Stmt::Do),
@@ -153,10 +153,10 @@ impl<'s, 'ts> Parser<'s> {
             "for_range_stmt" => ez_parse!(parse_for, Stmt::For),
             "for_in_stmt" => ez_parse!(parse_for_in, Stmt::ForIn),
             // \ statements that don't contain other statements /
-            "call_stmt" => Stmt::Call(self.parse_call(node)?),
-            "var_stmt" => Stmt::CompOp(self.parse_compop(node)?),
-            "ret_stmt" => Stmt::Return(self.parse_return(node)?),
-            "assign_stmt" => Stmt::Assign(self.parse_assign(node)?),
+            "call_stmt" => ez_parse!(parse_call, Stmt::Call),
+            "var_stmt" => ez_parse!(parse_compop, Stmt::CompOp),
+            "ret_stmt" => ez_parse!(parse_return, Stmt::Return),
+            "assign_stmt" => ez_parse!(parse_assign, Stmt::Assign),
             // \ these don't need to be parsed separately /
             "break_stmt" => Stmt::Break(Break {}),
             "continue_stmt" => Stmt::Continue(Continue {}),
@@ -165,7 +165,11 @@ impl<'s, 'ts> Parser<'s> {
         Ok(stmt)
     }
 
-    fn parse_local(&mut self, node: tree_sitter::Node<'ts>) -> Result<Local> {
+    fn parse_local(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Local> {
         let cursor = &mut node.walk();
         let mut bindings = Vec::new();
         let mut init = Vec::new();
@@ -182,7 +186,7 @@ impl<'s, 'ts> Parser<'s> {
                     parsing_init = true;
                 }
                 // delegate to expr parser
-                _ if parsing_init => init.push(self.parse_expr(child)?),
+                _ if parsing_init => init.push(self.parse_expr(child, unp)?),
                 _ => todo!("parse_local: {}", kind),
             }
         }
@@ -379,7 +383,7 @@ impl<'s, 'ts> Parser<'s> {
             match kind {
                 "while" | "do" | "end" => {}
                 _ if matches!(state, State::Condition) => {
-                    cond = Some(self.parse_expr(child)?);
+                    cond = Some(self.parse_expr(child, unp)?);
                     state = State::Block;
                 }
                 "block" => {
@@ -422,7 +426,7 @@ impl<'s, 'ts> Parser<'s> {
                     state = State::Condition;
                 }
                 _ if matches!(state, State::Condition) => {
-                    cond = Some(self.parse_expr(child)?);
+                    cond = Some(self.parse_expr(child, unp)?);
                 }
                 _ => return Err(self.error(child)),
             }
@@ -460,7 +464,7 @@ impl<'s, 'ts> Parser<'s> {
                 ("if", State::Condition) => {}
                 ("then", State::Block | State::Else) => {}
                 (_, State::Condition) => {
-                    cond = Some(self.parse_expr(child)?);
+                    cond = Some(self.parse_expr(child, unp)?);
                     state = State::Block;
                 }
                 (_, State::Block) => {
@@ -477,7 +481,7 @@ impl<'s, 'ts> Parser<'s> {
                 }
                 ("elseif_clause", State::Else) => {
                     let cond_node = child.child(1).ok_or_else(|| self.error(child))?;
-                    let cond = self.parse_expr(cond_node)?;
+                    let cond = self.parse_expr(cond_node, unp)?;
                     let b = child
                         .child(3)
                         .map(|n| self.parse_block(n, unp))
@@ -529,17 +533,17 @@ impl<'s, 'ts> Parser<'s> {
                 }
                 ("=", State::Start) => {}
                 (_, State::Start) => {
-                    start = Some(self.parse_expr(child)?);
+                    start = Some(self.parse_expr(child, unp)?);
                     state = State::End;
                 }
                 (",", State::End) => {}
                 (_, State::End) => {
-                    end = Some(self.parse_expr(child)?);
+                    end = Some(self.parse_expr(child, unp)?);
                     state = State::MaybeStep;
                 }
                 (",", State::MaybeStep) => state = State::Step,
                 (_, State::Step) => {
-                    step = Some(self.parse_expr(child)?);
+                    step = Some(self.parse_expr(child, unp)?);
                     state = State::Block;
                 }
                 (_, State::MaybeStep | State::Block) => {
@@ -587,7 +591,7 @@ impl<'s, 'ts> Parser<'s> {
                 }
                 (",", State::Expr | State::Var) => {}
                 (_, State::Expr) => {
-                    exprs.push(self.parse_expr(child)?);
+                    exprs.push(self.parse_expr(child, unp)?);
                 }
                 (_, State::Block) => {
                     block = Some(self.parse_block(child, unp)?);
@@ -603,7 +607,11 @@ impl<'s, 'ts> Parser<'s> {
         })
     }
 
-    fn parse_call(&mut self, node: tree_sitter::Node<'ts>) -> Result<Call> {
+    fn parse_call(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Call> {
         let cursor = &mut node.walk();
         let mut expr = None;
         let mut args = Vec::new();
@@ -615,7 +623,7 @@ impl<'s, 'ts> Parser<'s> {
             let kind = child.kind();
             match kind {
                 _ if parsing_expr => {
-                    expr = Some(self.parse_expr(child)?);
+                    expr = Some(self.parse_expr(child, unp)?);
                     parsing_expr = false
                 }
                 "arglist" => {
@@ -626,7 +634,7 @@ impl<'s, 'ts> Parser<'s> {
                             "(" => parsing_args = true,
                             ")" => parsing_args = false,
                             "," => {}
-                            _ if parsing_args => args.push(self.parse_expr(arg)?),
+                            _ if parsing_args => args.push(self.parse_expr(arg, unp)?),
                             _ => todo!("parse_call (arglist): {}", kind),
                         }
                     }
@@ -640,7 +648,11 @@ impl<'s, 'ts> Parser<'s> {
         })
     }
 
-    fn parse_compop(&mut self, node: tree_sitter::Node<'ts>) -> Result<CompOp> {
+    fn parse_compop(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<CompOp> {
         let cursor = &mut node.walk();
         let mut var = None;
         let mut op = None;
@@ -666,7 +678,7 @@ impl<'s, 'ts> Parser<'s> {
                     op = Some(CompOpKind::from_str(txt).map_err(|_| self.error(child))?);
                     state = State::Expr;
                 }
-                (_, State::Expr) => expr = Some(self.parse_expr(child)?),
+                (_, State::Expr) => expr = Some(self.parse_expr(child, unp)?),
                 _ => todo!("parse_compop: {}", kind),
             }
         }
@@ -678,20 +690,28 @@ impl<'s, 'ts> Parser<'s> {
         })
     }
 
-    fn parse_return(&mut self, node: tree_sitter::Node<'ts>) -> Result<Return> {
+    fn parse_return(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Return> {
         let cursor = &mut node.walk();
         let mut exprs = Vec::new();
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
                 "return" => {}
-                _ => exprs.push(self.parse_expr(child)?),
+                _ => exprs.push(self.parse_expr(child, unp)?),
             }
         }
         Ok(Return { exprs })
     }
 
-    fn parse_assign(&mut self, node: tree_sitter::Node<'ts>) -> Result<Assign> {
+    fn parse_assign(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Assign> {
         let cursor = &mut node.walk();
         let mut vars = Vec::new();
         let mut exprs = Vec::new();
@@ -709,7 +729,7 @@ impl<'s, 'ts> Parser<'s> {
                 ("var", State::Vars) => vars.push(self.parse_var(child)?),
                 ("=", State::Vars) => state = State::Exprs,
                 (",", _) => {}
-                (_, State::Exprs) => exprs.push(self.parse_expr(child)?),
+                (_, State::Exprs) => exprs.push(self.parse_expr(child, unp)?),
                 _ => return Err(self.error(child)),
             }
         }
@@ -737,7 +757,11 @@ impl<'s, 'ts> Parser<'s> {
         Ok(Binding { name, ty: None })
     }
 
-    fn parse_expr(&mut self, node: tree_sitter::Node<'ts>) -> Result<Expr> {
+    fn parse_expr(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Expr> {
         let kind = node.kind();
         match kind {
             "nil" => Ok(Expr::Nil),
@@ -761,19 +785,21 @@ impl<'s, 'ts> Parser<'s> {
 
                 Ok(Expr::Bool(end - start == 4))
             }
-            // "anon_fn" => Ok(Expr::Function(Box::new(self.parse_fn_body(node)?))),
+            "anon_fn" => Ok(Expr::Function(Box::new(
+                self.parse_fn_body(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
+            ))),
             "vararg" => Ok(Expr::VarArg),
             "exp_wrap" => Ok(Expr::Wrap(Box::new(
-                self.parse_expr(node.child(1).ok_or_else(|| self.error(node))?)?,
+                self.parse_expr(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
             ))),
             // delegate to parse_var
             "var" => Ok(Expr::Var(self.parse_var(node)?)),
             // delegate to parse_binop
-            "binexp" => Ok(Expr::BinOp(self.parse_binop(node)?)),
+            "binexp" => Ok(Expr::BinOp(self.parse_binop(node, unp)?)),
             // delegate to parse_unop
-            "unexp" => Ok(Expr::UnOp(self.parse_unop(node)?)),
+            "unexp" => Ok(Expr::UnOp(self.parse_unop(node, unp)?)),
             // delegate to parse_call
-            "call_stmt" => Ok(Expr::Call(Box::new(self.parse_call(node)?))),
+            "call_stmt" => Ok(Expr::Call(Box::new(self.parse_call(node, unp)?))),
             _ => todo!("parse_expr: {}", kind),
         }
     }
@@ -791,7 +817,11 @@ impl<'s, 'ts> Parser<'s> {
         Ok(Var::Name(name))
     }
 
-    fn parse_binop(&mut self, node: tree_sitter::Node<'ts>) -> Result<BinOp> {
+    fn parse_binop(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<BinOp> {
         let cursor = &mut node.walk();
         let mut op = None;
         let mut lhs = None;
@@ -807,7 +837,7 @@ impl<'s, 'ts> Parser<'s> {
         for child in node.children(cursor) {
             match state {
                 State::Lhs => {
-                    lhs = Some(self.parse_expr(child)?);
+                    lhs = Some(self.parse_expr(child, unp)?);
                     state = State::Op;
                 }
                 State::Op => {
@@ -817,7 +847,7 @@ impl<'s, 'ts> Parser<'s> {
                     state = State::Rhs;
                 }
                 State::Rhs => {
-                    rhs = Some(self.parse_expr(child)?);
+                    rhs = Some(self.parse_expr(child, unp)?);
                 }
             }
         }
@@ -828,7 +858,11 @@ impl<'s, 'ts> Parser<'s> {
         })
     }
 
-    fn parse_unop(&mut self, node: tree_sitter::Node<'ts>) -> Result<UnOp> {
+    fn parse_unop(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<UnOp> {
         let cursor = &mut node.walk();
         let mut op = None;
         let mut expr = None;
@@ -848,7 +882,7 @@ impl<'s, 'ts> Parser<'s> {
                     state = State::Expr;
                 }
                 State::Expr => {
-                    expr = Some(self.parse_expr(child)?);
+                    expr = Some(self.parse_expr(child, unp)?);
                 }
             }
         }
@@ -2191,9 +2225,12 @@ mod tests {
                     stmt_ptrs: vec![0, 1]
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::Assign(Assign {
-                        vars: vec![Var::Name("f".to_string())],
-                        exprs: vec![Expr::Function(Box::new(FunctionBody {
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "f".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Function(Box::new(FunctionBody {
                             generics: vec![],
                             ret_ty: None,
                             params: vec![
