@@ -220,15 +220,62 @@ pub struct FunctionType {
     ret_ty: Box<Type>,
 }
 
+/// Represents a do statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Do {
+    pub block: Block,
+}
+
+/// Represents a while statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct While {
+    pub cond: Expr,
+    pub block: Block,
+}
+
+/// Represents a repeat statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Repeat {
+    pub block: Block,
+    pub cond: Expr,
+}
+
+/// Represents an if statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct If {
+    pub cond: Expr,
+    pub block: Block,
+    pub else_if_blocks: Vec<(Expr, Block)>,
+    pub else_block: Option<Block>,
+}
+
+/// Represents a for statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct For {
+    pub var: Binding,
+    pub start: Expr,
+    pub end: Expr,
+    pub step: Option<Expr>,
+    pub block: Block,
+}
+
+/// Represents a for in statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForIn {
+    pub vars: Vec<Binding>,
+    pub exprs: Vec<Expr>,
+    pub block: Block,
+}
+
 /// Represents a statement node in the AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     CompOp(CompOp),
     Call(Call),
-    // Do(Do),
-    // While(While),
-    // Repeat(Repeat),
-    // If(If),
+    Do(Do),
+    While(While),
+    Repeat(Repeat),
+    If(If),
     // For(For),
     // ForIn(ForIn),
     FunctionDef(FunctionDef),

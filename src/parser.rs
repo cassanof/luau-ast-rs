@@ -37,6 +37,8 @@ impl<'a> Iterator for NodeSiblingIter<'a> {
     }
 }
 
+// TODO: write failure tests and remove ok_or_else, use unwrap_unchecked and benchmark
+
 impl<'s, 'ts> Parser<'s> {
     pub fn new(text: &'s str) -> Self {
         let ts = ts_parser();
@@ -124,18 +126,24 @@ impl<'s, 'ts> Parser<'s> {
     fn parse_stmt(&mut self, node: tree_sitter::Node<'ts>) -> Result<(Stmt, UnparsedStmts<'ts>)> {
         let kind = node.kind();
         let mut to_be_parsed = Vec::new();
+
+        /// parses and adds unparsed statements to `to_be_parsed`
+        macro_rules! ez_parse {
+            ($parse_fn:ident, $stmt:expr) => {{
+                let (stmt, unparsed_stmts) = self.$parse_fn(node)?;
+                to_be_parsed.extend(unparsed_stmts);
+                $stmt(stmt)
+            }};
+        }
+
         let stmt = match kind {
             "local_var_stmt" => Stmt::Local(self.parse_local(node)?),
-            "fn_stmt" => {
-                let (func, unparsed_stmts) = self.parse_function_def(node)?;
-                to_be_parsed.extend(unparsed_stmts);
-                Stmt::FunctionDef(func)
-            }
-            "local_fn_stmt" => {
-                let (func, unparsed_stmts) = self.parse_local_function_def(node)?;
-                to_be_parsed.extend(unparsed_stmts);
-                Stmt::LocalFunctionDef(func)
-            }
+            "fn_stmt" => ez_parse!(parse_function_def, Stmt::FunctionDef),
+            "local_fn_stmt" => ez_parse!(parse_local_function_def, Stmt::LocalFunctionDef),
+            "do_stmt" => ez_parse!(parse_do, Stmt::Do),
+            "while_stmt" => ez_parse!(parse_while, Stmt::While),
+            "repeat_stmt" => ez_parse!(parse_repeat, Stmt::Repeat),
+            "if_stmt" => ez_parse!(parse_if, Stmt::If),
             "call_stmt" => Stmt::Call(self.parse_call(node)?),
             "var_stmt" => Stmt::CompOp(self.parse_compop(node)?),
             "ret_stmt" => Stmt::Return(self.parse_return(node)?),
@@ -224,9 +232,7 @@ impl<'s, 'ts> Parser<'s> {
                 generics,
                 ret_ty,
                 // there may be no block if the function is empty
-                block: block.unwrap_or_else(|| Block {
-                    stmt_ptrs: Vec::new(),
-                }),
+                block: block.unwrap_or_default(),
             },
             to_be_parsed,
         ))
@@ -323,6 +329,179 @@ impl<'s, 'ts> Parser<'s> {
             LocalFunctionDef {
                 name,
                 body: body.ok_or_else(|| self.error(node))?,
+            },
+            to_be_parsed,
+        ))
+    }
+
+    fn parse_do(&mut self, node: tree_sitter::Node<'ts>) -> Result<(Do, UnparsedStmts<'ts>)> {
+        let cursor = &mut node.walk();
+        let mut block = None;
+        let mut to_be_parsed = Vec::new();
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match kind {
+                "do" | "end" => {}
+                "block" => {
+                    let (b, unparsed_stmts) = self.parse_block(child)?;
+                    to_be_parsed.extend(unparsed_stmts);
+                    block = Some(b);
+                }
+                _ => return Err(self.error(child)),
+            }
+        }
+
+        Ok((
+            Do {
+                block: block.ok_or_else(|| self.error(node))?,
+            },
+            to_be_parsed,
+        ))
+    }
+
+    fn parse_while(&mut self, node: tree_sitter::Node<'ts>) -> Result<(While, UnparsedStmts<'ts>)> {
+        let cursor = &mut node.walk();
+        let mut cond = None;
+        let mut block = None;
+        let mut to_be_parsed = Vec::new();
+
+        enum Step {
+            Condition,
+            Block,
+        }
+
+        let mut step = Step::Condition;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match kind {
+                "while" | "do" | "end" => {}
+                _ if matches!(step, Step::Condition) => {
+                    cond = Some(self.parse_expr(child)?);
+                    step = Step::Block;
+                }
+                "block" => {
+                    let (b, unparsed_stmts) = self.parse_block(child)?;
+                    to_be_parsed.extend(unparsed_stmts);
+                    block = Some(b);
+                }
+                _ => return Err(self.error(child)),
+            }
+        }
+
+        Ok((
+            While {
+                cond: cond.ok_or_else(|| self.error(node))?,
+                block: block.ok_or_else(|| self.error(node))?,
+            },
+            to_be_parsed,
+        ))
+    }
+
+    fn parse_repeat(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+    ) -> Result<(Repeat, UnparsedStmts<'ts>)> {
+        let cursor = &mut node.walk();
+        let mut cond = None;
+        let mut block = None;
+        let mut to_be_parsed = Vec::new();
+
+        enum Step {
+            Block,
+            Condition,
+        }
+
+        let mut step = Step::Block;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match kind {
+                "repeat" | "until" => {}
+                "block" => {
+                    let (b, unparsed_stmts) = self.parse_block(child)?;
+                    to_be_parsed.extend(unparsed_stmts);
+                    block = Some(b);
+                    step = Step::Condition;
+                }
+                _ if matches!(step, Step::Condition) => {
+                    cond = Some(self.parse_expr(child)?);
+                }
+                _ => return Err(self.error(child)),
+            }
+        }
+
+        Ok((
+            Repeat {
+                cond: cond.ok_or_else(|| self.error(node))?,
+                block: block.ok_or_else(|| self.error(node))?,
+            },
+            to_be_parsed,
+        ))
+    }
+
+    fn parse_if(&mut self, node: tree_sitter::Node<'ts>) -> Result<(If, UnparsedStmts<'ts>)> {
+        let cursor = &mut node.walk();
+        let mut cond = None;
+        let mut if_block = None;
+        let mut else_if_blocks = Vec::new();
+        let mut else_block = None;
+        let mut to_be_parsed = Vec::new();
+
+        #[derive(Debug)]
+        enum Step {
+            Condition,
+            Else,
+            Block,
+        }
+
+        let mut step = Step::Condition;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &step) {
+                ("end", _) => {}
+                ("if", Step::Condition) => {}
+                ("then", Step::Block | Step::Else) => {}
+                (_, Step::Condition) => {
+                    cond = Some(self.parse_expr(child)?);
+                    step = Step::Block;
+                }
+                (_, Step::Block) => {
+                    let (b, unparsed_stmts) = self.parse_block(child)?;
+                    to_be_parsed.extend(unparsed_stmts);
+                    if_block = Some(b);
+                    step = Step::Else;
+                }
+                ("else_clause", Step::Else) => {
+                    let (b, unparsed_stmts) = child
+                        .child(1)
+                        .map(|n| self.parse_block(n))
+                        .unwrap_or_else(|| Ok((Block::default(), Vec::new())))?;
+                    to_be_parsed.extend(unparsed_stmts);
+                    else_block = Some(b);
+                }
+                ("elseif_clause", Step::Else) => {
+                    let cond_node = child.child(1).ok_or_else(|| self.error(child))?;
+                    let cond = self.parse_expr(cond_node)?;
+                    let (b, unparsed_stmts) = child
+                        .child(3)
+                        .map(|n| self.parse_block(n))
+                        .unwrap_or_else(|| Ok((Block::default(), Vec::new())))?;
+                    to_be_parsed.extend(unparsed_stmts);
+                    else_if_blocks.push((cond, b));
+                }
+                _ => todo!("parse_if ({:?}): {}", step, kind),
+            }
+        }
+
+        Ok((
+            If {
+                cond: cond.ok_or_else(|| self.error(node))?,
+                block: if_block.ok_or_else(|| self.error(node))?,
+                else_if_blocks,
+                else_block,
             },
             to_be_parsed,
         ))
@@ -681,6 +860,23 @@ mod tests {
                         init: vec![Expr::Number(2.0), Expr::Number(3.0)]
                     }))
                 ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_local_empty() {
+        assert_parse!(
+            "local a",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "a".to_string(),
+                        ty: None
+                    }],
+                    init: vec![]
+                }))]
             }
         );
     }
@@ -1439,6 +1635,176 @@ mod tests {
                         vars: vec![Var::Name("a".to_string()), Var::Name("b".to_string())],
                         exprs: vec![Expr::Number(1.0), Expr::Number(2.0)]
                     })),
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_do_end() {
+        assert_parse!(
+            "do\nprint(1)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::Do(Do {
+                        block: Block { stmt_ptrs: vec![1] }
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Number(1.0)]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_while() {
+        assert_parse!(
+            "while true do\nprint(1)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::While(While {
+                        cond: Expr::Bool(true),
+                        block: Block { stmt_ptrs: vec![1] }
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Number(1.0)]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_repeat() {
+        assert_parse!(
+            "repeat\nprint(1)\nuntil true",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::Repeat(Repeat {
+                        block: Block { stmt_ptrs: vec![1] },
+                        cond: Expr::Bool(true)
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Number(1.0)]
+                    }))
+                ]
+            }
+        );
+    }
+
+    // if tests:
+    // 1. if x then
+    // 2. if x then else
+    // 3. if x then elseif y then
+    // 4. if x then elseif y then else
+    // 5. if x then elseif y then elseif z then
+
+    #[test]
+    fn test_if() {
+        assert_parse!(
+            "if true then\nprint(1)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::If(If {
+                        cond: Expr::Bool(true),
+                        block: Block { stmt_ptrs: vec![1] },
+                        else_if_blocks: vec![],
+                        else_block: None
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Number(1.0)]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_if_else() {
+        assert_parse!(
+            "if true then\nprint(1)\nelse\nprint(2)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::If(If {
+                        cond: Expr::Bool(true),
+                        block: Block { stmt_ptrs: vec![1] },
+                        else_if_blocks: vec![],
+                        else_block: Some(Block { stmt_ptrs: vec![2] })
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Number(1.0)]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Number(2.0)]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_if_elseif() {
+        assert_parse!(
+            "if true then\nprint(1)\nelseif false then\nprint(2)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::If(If {
+                        cond: Expr::Bool(true),
+                        block: Block { stmt_ptrs: vec![1] },
+                        else_if_blocks: vec![(Expr::Bool(false), Block { stmt_ptrs: vec![2] },)],
+                        else_block: None
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Number(1.0)]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Number(2.0)]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_if_elseif_else() {
+        assert_parse!(
+            "if true then\nprint(1)\nelseif false then\nprint(2)\nelse\nprint(3)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::If(If {
+                        cond: Expr::Bool(true),
+                        block: Block { stmt_ptrs: vec![1] },
+                        else_if_blocks: vec![(Expr::Bool(false), Block { stmt_ptrs: vec![2] },)],
+                        else_block: Some(Block { stmt_ptrs: vec![3] })
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Number(1.0)]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Number(2.0)]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Number(3.0)]
+                    }))
                 ]
             }
         );
