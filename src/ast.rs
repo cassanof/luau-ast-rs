@@ -276,8 +276,8 @@ pub enum Stmt {
     While(While),
     Repeat(Repeat),
     If(If),
-    // For(For),
-    // ForIn(ForIn),
+    For(For),
+    ForIn(ForIn),
     FunctionDef(FunctionDef),
     LocalFunctionDef(LocalFunctionDef),
     Local(Local),
@@ -300,8 +300,11 @@ pub enum Expr {
     VarArg,
     Var(Var),
     Wrap(Box<Expr>),
+    // NOTE: boxed because Call uses Expr
+    Call(Box<Call>),
     // TableConstructor(TableConstructor),
-    // Function(Function),
+    // NOTE: boxed because FunctionBody uses Expr
+    Function(Box<FunctionBody>),
     // PrefixExp(PrefixExp),
     // IfElse(IfElse),
     // StringInterp(StringInterp),

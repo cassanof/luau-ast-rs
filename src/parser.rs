@@ -52,14 +52,14 @@ impl<'s, 'ts> Parser<'s> {
     pub fn parse(mut self) -> Result<Chunk> {
         let tree = self.ts.parse(self.text, None).ok_or(ParseError::TSError)?;
         let root = tree.root_node();
-        let (block, mut to_be_parsed) = self.parse_block(root)?;
+        let mut to_be_parsed = Vec::new();
+        let block = self.parse_block(root, &mut to_be_parsed)?;
         self.chunk.block = block;
 
         while let Some(StmtToBeParsed { ptr, node }) = to_be_parsed.pop() {
-            match self.parse_stmt(node) {
-                Ok((stmt, more_to_parse)) => {
+            match self.parse_stmt(node, &mut to_be_parsed) {
+                Ok(stmt) => {
                     self.chunk.set_stmt(ptr, StmtStatus::Some(stmt));
-                    to_be_parsed.extend(more_to_parse);
                 }
                 Err(err) => {
                     self.chunk.set_stmt(ptr, StmtStatus::Error(err));
@@ -108,35 +108,41 @@ impl<'s, 'ts> Parser<'s> {
         ParseError::SyntaxError(start, end, clipped)
     }
 
-    fn parse_block(&mut self, node: tree_sitter::Node<'ts>) -> Result<(Block, UnparsedStmts<'ts>)> {
+    fn parse_block(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Block> {
         let mut stmts = Vec::new();
-        let mut to_be_parsed = Vec::new();
         let cursor = &mut node.walk();
         for child in node.children(cursor) {
             let stmt_ptr = self.chunk.alloc();
             stmts.push(stmt_ptr);
-            to_be_parsed.push(StmtToBeParsed {
+            unp.push(StmtToBeParsed {
                 ptr: stmt_ptr,
                 node: child,
             });
         }
-        Ok((Block { stmt_ptrs: stmts }, to_be_parsed))
+        Ok(Block { stmt_ptrs: stmts })
     }
 
-    fn parse_stmt(&mut self, node: tree_sitter::Node<'ts>) -> Result<(Stmt, UnparsedStmts<'ts>)> {
+    fn parse_stmt(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Stmt> {
         let kind = node.kind();
-        let mut to_be_parsed = Vec::new();
 
-        /// parses and adds unparsed statements to `to_be_parsed`
+        /// parses and adds unparsed statements to `unp`
         macro_rules! ez_parse {
             ($parse_fn:ident, $stmt:expr) => {{
-                let (stmt, unparsed_stmts) = self.$parse_fn(node)?;
-                to_be_parsed.extend(unparsed_stmts);
+                let stmt = self.$parse_fn(node, unp)?;
                 $stmt(stmt)
             }};
         }
 
         let stmt = match kind {
+            // \ all these statements create additional scopes /
             "local_var_stmt" => Stmt::Local(self.parse_local(node)?),
             "fn_stmt" => ez_parse!(parse_function_def, Stmt::FunctionDef),
             "local_fn_stmt" => ez_parse!(parse_local_function_def, Stmt::LocalFunctionDef),
@@ -144,16 +150,19 @@ impl<'s, 'ts> Parser<'s> {
             "while_stmt" => ez_parse!(parse_while, Stmt::While),
             "repeat_stmt" => ez_parse!(parse_repeat, Stmt::Repeat),
             "if_stmt" => ez_parse!(parse_if, Stmt::If),
+            "for_range_stmt" => ez_parse!(parse_for, Stmt::For),
+            "for_in_stmt" => ez_parse!(parse_for_in, Stmt::ForIn),
+            // \ statements that don't contain other statements /
             "call_stmt" => Stmt::Call(self.parse_call(node)?),
             "var_stmt" => Stmt::CompOp(self.parse_compop(node)?),
             "ret_stmt" => Stmt::Return(self.parse_return(node)?),
             "assign_stmt" => Stmt::Assign(self.parse_assign(node)?),
-            // these don't need to be parsed separately
+            // \ these don't need to be parsed separately /
             "break_stmt" => Stmt::Break(Break {}),
             "continue_stmt" => Stmt::Continue(Continue {}),
             _ => todo!("parse_stmt: {}", kind),
         };
-        Ok((stmt, to_be_parsed))
+        Ok(stmt)
     }
 
     fn parse_local(&mut self, node: tree_sitter::Node<'ts>) -> Result<Local> {
@@ -184,64 +193,63 @@ impl<'s, 'ts> Parser<'s> {
         &mut self,
         // NOTE: the node has to be the "(" or "<" of the function def
         node: tree_sitter::Node<'ts>,
-    ) -> Result<(FunctionBody, UnparsedStmts<'ts>)> {
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<FunctionBody> {
         let mut params = Vec::new();
-        let mut to_be_parsed = Vec::new();
         let mut block = None;
         let mut generics = Vec::new();
         let mut ret_ty = None;
 
-        enum Step {
+        enum State {
             Generics,
             Params,
             Block,
         }
 
-        let mut step = Step::Generics;
+        let mut state = State::Generics;
 
         for node in (NodeSiblingIter { node: Some(node) }) {
             let kind = node.kind();
-            match (kind, &step) {
-                ("<", Step::Generics) => {}
-                ("generic", Step::Generics) => {
+            match (kind, &state) {
+                ("<", State::Generics) => {}
+                ("generic", State::Generics) => {
                     let txt = self.extract_text(node);
                     generics.push(GenericParam::Name(txt.to_string()));
                 }
-                ("genpack", Step::Generics) => {
+                ("genpack", State::Generics) => {
                     let txt = self.extract_text(node.child(0).ok_or_else(|| self.error(node))?);
                     generics.push(GenericParam::Pack(txt.to_string()));
                 }
-                (">", Step::Generics) => step = Step::Params,
-                (",", Step::Generics | Step::Params) => {}
-                ("(", Step::Generics | Step::Params) => step = Step::Params,
-                ("param", Step::Params) => params.push(self.parse_binding(node)?),
-                (")", Step::Params) => step = Step::Block,
-                ("block", Step::Block) => {
-                    let (b, unparsed_stmts) = self.parse_block(node)?;
-                    to_be_parsed.extend(unparsed_stmts);
+                (">", State::Generics) => state = State::Params,
+                (",", State::Generics | State::Params) => {}
+                ("(", State::Generics | State::Params) => state = State::Params,
+                ("param", State::Params) => params.push(self.parse_binding(node)?),
+                (")", State::Params) => state = State::Block,
+                ("block", State::Block) => {
+                    let mut unparsed_stmts = Vec::new();
+                    let b = self.parse_block(node, &mut unparsed_stmts)?;
+                    unp.extend(unparsed_stmts);
                     block = Some(b);
                 }
-                ("end", Step::Block) => break,
+                ("end", State::Block) => break,
                 _ => todo!("parse_fn_body: {}", kind),
             }
         }
 
-        Ok((
-            FunctionBody {
-                params,
-                generics,
-                ret_ty,
-                // there may be no block if the function is empty
-                block: block.unwrap_or_default(),
-            },
-            to_be_parsed,
-        ))
+        Ok(FunctionBody {
+            params,
+            generics,
+            ret_ty,
+            // there may be no block if the function is empty
+            block: block.unwrap_or_default(),
+        })
     }
 
     fn parse_function_def(
         &mut self,
         node: tree_sitter::Node<'ts>,
-    ) -> Result<(FunctionDef, UnparsedStmts<'ts>)> {
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<FunctionDef> {
         let cursor = &mut node.walk();
 
         // vars to fill
@@ -249,75 +257,69 @@ impl<'s, 'ts> Parser<'s> {
         let mut is_method = false;
         let mut name = String::new();
         let mut body = None;
-        let mut to_be_parsed = Vec::new();
 
-        enum Step {
+        enum State {
             // we assume that a function def starts with just it's name
             Name,
             // the name was actually a table, so now we need to parse the actual name
             NameWasTable,
         }
 
-        let mut step = Step::Name;
+        let mut state = State::Name;
 
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
-                "name" => match step {
-                    Step::Name => {
+                "name" => match state {
+                    State::Name => {
                         name.push_str(self.extract_text(child));
                     }
-                    Step::NameWasTable => {
+                    State::NameWasTable => {
                         let table_name = self.extract_text(child);
                         table = Some(std::mem::replace(&mut name, table_name.to_string()));
                     }
                 },
                 "<" | "(" => {
-                    let (parsed_body, unparsed_stmts) = self.parse_fn_body(child)?;
-                    to_be_parsed.extend(unparsed_stmts);
+                    let parsed_body = self.parse_fn_body(child, unp)?;
                     body = Some(parsed_body);
                     break;
                 }
                 "." => {
-                    step = Step::NameWasTable;
+                    state = State::NameWasTable;
                 }
                 ":" => {
-                    step = Step::NameWasTable;
+                    state = State::NameWasTable;
                     is_method = true;
                 }
                 "function" => {}
                 _ => todo!("parse_function_def: {}", kind),
             }
         }
-        Ok((
-            FunctionDef {
-                table,
-                is_method,
-                name,
-                body: body.ok_or_else(|| self.error(node))?,
-            },
-            to_be_parsed,
-        ))
+        Ok(FunctionDef {
+            table,
+            is_method,
+            name,
+            body: body.ok_or_else(|| self.error(node))?,
+        })
     }
 
     fn parse_local_function_def(
         &mut self,
         node: tree_sitter::Node<'ts>,
-    ) -> Result<(LocalFunctionDef, UnparsedStmts<'ts>)> {
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<LocalFunctionDef> {
         let cursor = &mut node.walk();
 
         // vars to fill
         let mut name = String::new();
         let mut body = None;
-        let mut to_be_parsed = Vec::new();
 
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
                 "name" => name.push_str(self.extract_text(child)),
                 "<" | "(" => {
-                    let (parsed_body, unparsed_stmts) = self.parse_fn_body(child)?;
-                    to_be_parsed.extend(unparsed_stmts);
+                    let parsed_body = self.parse_fn_body(child, unp)?;
                     body = Some(parsed_body);
                     break;
                 }
@@ -325,186 +327,280 @@ impl<'s, 'ts> Parser<'s> {
                 _ => todo!("parse_function_def: {}", kind),
             }
         }
-        Ok((
-            LocalFunctionDef {
-                name,
-                body: body.ok_or_else(|| self.error(node))?,
-            },
-            to_be_parsed,
-        ))
+        Ok(LocalFunctionDef {
+            name,
+            body: body.ok_or_else(|| self.error(node))?,
+        })
     }
 
-    fn parse_do(&mut self, node: tree_sitter::Node<'ts>) -> Result<(Do, UnparsedStmts<'ts>)> {
+    fn parse_do(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Do> {
         let cursor = &mut node.walk();
         let mut block = None;
-        let mut to_be_parsed = Vec::new();
 
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
                 "do" | "end" => {}
                 "block" => {
-                    let (b, unparsed_stmts) = self.parse_block(child)?;
-                    to_be_parsed.extend(unparsed_stmts);
+                    let b = self.parse_block(child, unp)?;
                     block = Some(b);
                 }
                 _ => return Err(self.error(child)),
             }
         }
 
-        Ok((
-            Do {
-                block: block.ok_or_else(|| self.error(node))?,
-            },
-            to_be_parsed,
-        ))
+        Ok(Do {
+            block: block.unwrap_or_default(),
+        })
     }
 
-    fn parse_while(&mut self, node: tree_sitter::Node<'ts>) -> Result<(While, UnparsedStmts<'ts>)> {
+    fn parse_while(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<While> {
         let cursor = &mut node.walk();
         let mut cond = None;
         let mut block = None;
-        let mut to_be_parsed = Vec::new();
 
-        enum Step {
+        enum State {
             Condition,
             Block,
         }
 
-        let mut step = Step::Condition;
+        let mut state = State::Condition;
 
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
                 "while" | "do" | "end" => {}
-                _ if matches!(step, Step::Condition) => {
+                _ if matches!(state, State::Condition) => {
                     cond = Some(self.parse_expr(child)?);
-                    step = Step::Block;
+                    state = State::Block;
                 }
                 "block" => {
-                    let (b, unparsed_stmts) = self.parse_block(child)?;
-                    to_be_parsed.extend(unparsed_stmts);
+                    let b = self.parse_block(child, unp)?;
                     block = Some(b);
                 }
                 _ => return Err(self.error(child)),
             }
         }
 
-        Ok((
-            While {
-                cond: cond.ok_or_else(|| self.error(node))?,
-                block: block.ok_or_else(|| self.error(node))?,
-            },
-            to_be_parsed,
-        ))
+        Ok(While {
+            cond: cond.ok_or_else(|| self.error(node))?,
+            block: block.unwrap_or_default(),
+        })
     }
 
     fn parse_repeat(
         &mut self,
         node: tree_sitter::Node<'ts>,
-    ) -> Result<(Repeat, UnparsedStmts<'ts>)> {
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Repeat> {
         let cursor = &mut node.walk();
         let mut cond = None;
         let mut block = None;
-        let mut to_be_parsed = Vec::new();
 
-        enum Step {
+        enum State {
             Block,
             Condition,
         }
 
-        let mut step = Step::Block;
+        let mut state = State::Block;
 
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
                 "repeat" | "until" => {}
                 "block" => {
-                    let (b, unparsed_stmts) = self.parse_block(child)?;
-                    to_be_parsed.extend(unparsed_stmts);
+                    let b = self.parse_block(child, unp)?;
                     block = Some(b);
-                    step = Step::Condition;
+                    state = State::Condition;
                 }
-                _ if matches!(step, Step::Condition) => {
+                _ if matches!(state, State::Condition) => {
                     cond = Some(self.parse_expr(child)?);
                 }
                 _ => return Err(self.error(child)),
             }
         }
 
-        Ok((
-            Repeat {
-                cond: cond.ok_or_else(|| self.error(node))?,
-                block: block.ok_or_else(|| self.error(node))?,
-            },
-            to_be_parsed,
-        ))
+        Ok(Repeat {
+            cond: cond.ok_or_else(|| self.error(node))?,
+            block: block.unwrap_or_default(),
+        })
     }
 
-    fn parse_if(&mut self, node: tree_sitter::Node<'ts>) -> Result<(If, UnparsedStmts<'ts>)> {
+    fn parse_if(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<If> {
         let cursor = &mut node.walk();
         let mut cond = None;
         let mut if_block = None;
         let mut else_if_blocks = Vec::new();
         let mut else_block = None;
-        let mut to_be_parsed = Vec::new();
 
-        #[derive(Debug)]
-        enum Step {
+        enum State {
             Condition,
             Else,
             Block,
         }
 
-        let mut step = Step::Condition;
+        let mut state = State::Condition;
 
         for child in node.children(cursor) {
             let kind = child.kind();
-            match (kind, &step) {
+            match (kind, &state) {
                 ("end", _) => {}
-                ("if", Step::Condition) => {}
-                ("then", Step::Block | Step::Else) => {}
-                (_, Step::Condition) => {
+                ("if", State::Condition) => {}
+                ("then", State::Block | State::Else) => {}
+                (_, State::Condition) => {
                     cond = Some(self.parse_expr(child)?);
-                    step = Step::Block;
+                    state = State::Block;
                 }
-                (_, Step::Block) => {
-                    let (b, unparsed_stmts) = self.parse_block(child)?;
-                    to_be_parsed.extend(unparsed_stmts);
-                    if_block = Some(b);
-                    step = Step::Else;
+                (_, State::Block) => {
+                    if_block = Some(self.parse_block(child, unp)?);
+                    state = State::Else;
                 }
-                ("else_clause", Step::Else) => {
-                    let (b, unparsed_stmts) = child
-                        .child(1)
-                        .map(|n| self.parse_block(n))
-                        .unwrap_or_else(|| Ok((Block::default(), Vec::new())))?;
-                    to_be_parsed.extend(unparsed_stmts);
-                    else_block = Some(b);
+                ("else_clause", State::Else) => {
+                    else_block = Some(
+                        child
+                            .child(1)
+                            .map(|n| self.parse_block(n, unp))
+                            .unwrap_or_else(|| Ok(Block::default()))?,
+                    );
                 }
-                ("elseif_clause", Step::Else) => {
+                ("elseif_clause", State::Else) => {
                     let cond_node = child.child(1).ok_or_else(|| self.error(child))?;
                     let cond = self.parse_expr(cond_node)?;
-                    let (b, unparsed_stmts) = child
+                    let b = child
                         .child(3)
-                        .map(|n| self.parse_block(n))
-                        .unwrap_or_else(|| Ok((Block::default(), Vec::new())))?;
-                    to_be_parsed.extend(unparsed_stmts);
+                        .map(|n| self.parse_block(n, unp))
+                        .unwrap_or_else(|| Ok(Block::default()))?;
                     else_if_blocks.push((cond, b));
                 }
-                _ => todo!("parse_if ({:?}): {}", step, kind),
+                _ => return Err(self.error(child)),
             }
         }
 
-        Ok((
-            If {
-                cond: cond.ok_or_else(|| self.error(node))?,
-                block: if_block.ok_or_else(|| self.error(node))?,
-                else_if_blocks,
-                else_block,
-            },
-            to_be_parsed,
-        ))
+        Ok(If {
+            cond: cond.ok_or_else(|| self.error(node))?,
+            block: if_block.unwrap_or_default(),
+            else_if_blocks,
+            else_block,
+        })
+    }
+
+    fn parse_for(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<For> {
+        let cursor = &mut node.walk();
+        let mut var = None;
+        let mut start = None;
+        let mut end = None;
+        let mut step = None;
+        let mut block = None;
+
+        enum State {
+            Var,
+            Start,
+            End,
+            MaybeStep,
+            Step,
+            Block,
+        }
+
+        let mut state = State::Var;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &state) {
+                ("for" | "do" | "end", _) => {}
+                ("binding", State::Var) => {
+                    var = Some(self.parse_binding(child)?);
+                    state = State::Start;
+                }
+                ("=", State::Start) => {}
+                (_, State::Start) => {
+                    start = Some(self.parse_expr(child)?);
+                    state = State::End;
+                }
+                (",", State::End) => {}
+                (_, State::End) => {
+                    end = Some(self.parse_expr(child)?);
+                    state = State::MaybeStep;
+                }
+                (",", State::MaybeStep) => state = State::Step,
+                (_, State::Step) => {
+                    step = Some(self.parse_expr(child)?);
+                    state = State::Block;
+                }
+                (_, State::MaybeStep | State::Block) => {
+                    block = Some(self.parse_block(child, unp)?);
+                }
+                _ => return Err(self.error(child)),
+            }
+        }
+
+        Ok(For {
+            var: var.ok_or_else(|| self.error(node))?,
+            start: start.ok_or_else(|| self.error(node))?,
+            end: end.ok_or_else(|| self.error(node))?,
+            step,
+            block: block.unwrap_or_default(),
+        })
+    }
+
+    fn parse_for_in(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<ForIn> {
+        let cursor = &mut node.walk();
+        let mut vars = Vec::new();
+        let mut exprs = Vec::new();
+        let mut block = None;
+
+        enum State {
+            Var,
+            Expr,
+            Block,
+        }
+
+        let mut state = State::Var;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &state) {
+                ("for" | "end", _) => {}
+                ("in", State::Var) => state = State::Expr,
+                ("do", State::Expr) => state = State::Block,
+                ("binding", State::Var) => {
+                    vars.push(self.parse_binding(child)?);
+                }
+                (",", State::Expr | State::Var) => {}
+                (_, State::Expr) => {
+                    exprs.push(self.parse_expr(child)?);
+                }
+                (_, State::Block) => {
+                    block = Some(self.parse_block(child, unp)?);
+                }
+                _ => return Err(self.error(child)),
+            }
+        }
+
+        Ok(ForIn {
+            vars,
+            exprs,
+            block: block.unwrap_or_default(),
+        })
     }
 
     fn parse_call(&mut self, node: tree_sitter::Node<'ts>) -> Result<Call> {
@@ -550,27 +646,27 @@ impl<'s, 'ts> Parser<'s> {
         let mut op = None;
         let mut expr = None;
 
-        enum Step {
+        enum State {
             Var,
             Op,
             Expr,
         }
 
-        let mut step = Step::Var;
+        let mut state = State::Var;
 
         for child in node.children(cursor) {
             let kind = child.kind();
-            match (kind, &step) {
-                ("var", Step::Var) => {
+            match (kind, &state) {
+                ("var", State::Var) => {
                     var = Some(self.parse_var(child)?);
-                    step = Step::Op;
+                    state = State::Op;
                 }
-                (_, Step::Op) => {
+                (_, State::Op) => {
                     let txt = self.extract_text(child);
                     op = Some(CompOpKind::from_str(txt).map_err(|_| self.error(child))?);
-                    step = Step::Expr;
+                    state = State::Expr;
                 }
-                (_, Step::Expr) => expr = Some(self.parse_expr(child)?),
+                (_, State::Expr) => expr = Some(self.parse_expr(child)?),
                 _ => todo!("parse_compop: {}", kind),
             }
         }
@@ -600,20 +696,20 @@ impl<'s, 'ts> Parser<'s> {
         let mut vars = Vec::new();
         let mut exprs = Vec::new();
 
-        enum Step {
+        enum State {
             Vars,
             Exprs,
         }
 
-        let mut step = Step::Vars;
+        let mut state = State::Vars;
 
         for child in node.children(cursor) {
             let kind = child.kind();
-            match (kind, &step) {
-                ("var", Step::Vars) => vars.push(self.parse_var(child)?),
-                ("=", Step::Vars) => step = Step::Exprs,
+            match (kind, &state) {
+                ("var", State::Vars) => vars.push(self.parse_var(child)?),
+                ("=", State::Vars) => state = State::Exprs,
                 (",", _) => {}
-                (_, Step::Exprs) => exprs.push(self.parse_expr(child)?),
+                (_, State::Exprs) => exprs.push(self.parse_expr(child)?),
                 _ => return Err(self.error(child)),
             }
         }
@@ -644,6 +740,7 @@ impl<'s, 'ts> Parser<'s> {
     fn parse_expr(&mut self, node: tree_sitter::Node<'ts>) -> Result<Expr> {
         let kind = node.kind();
         match kind {
+            "nil" => Ok(Expr::Nil),
             "number" => {
                 let text = self.extract_text(node);
                 let num = text.parse().map_err(|_| self.error(node))?;
@@ -664,6 +761,7 @@ impl<'s, 'ts> Parser<'s> {
 
                 Ok(Expr::Bool(end - start == 4))
             }
+            // "anon_fn" => Ok(Expr::Function(Box::new(self.parse_fn_body(node)?))),
             "vararg" => Ok(Expr::VarArg),
             "exp_wrap" => Ok(Expr::Wrap(Box::new(
                 self.parse_expr(node.child(1).ok_or_else(|| self.error(node))?)?,
@@ -674,6 +772,8 @@ impl<'s, 'ts> Parser<'s> {
             "binexp" => Ok(Expr::BinOp(self.parse_binop(node)?)),
             // delegate to parse_unop
             "unexp" => Ok(Expr::UnOp(self.parse_unop(node)?)),
+            // delegate to parse_call
+            "call_stmt" => Ok(Expr::Call(Box::new(self.parse_call(node)?))),
             _ => todo!("parse_expr: {}", kind),
         }
     }
@@ -697,26 +797,26 @@ impl<'s, 'ts> Parser<'s> {
         let mut lhs = None;
         let mut rhs = None;
 
-        enum Step {
+        enum State {
             Lhs,
             Op,
             Rhs,
         }
 
-        let mut step = Step::Lhs;
+        let mut state = State::Lhs;
         for child in node.children(cursor) {
-            match step {
-                Step::Lhs => {
+            match state {
+                State::Lhs => {
                     lhs = Some(self.parse_expr(child)?);
-                    step = Step::Op;
+                    state = State::Op;
                 }
-                Step::Op => {
+                State::Op => {
                     let txt = self.extract_text(child);
                     let parsed_op = BinOpKind::from_str(txt).map_err(|_| self.error(node))?;
                     op = Some(parsed_op);
-                    step = Step::Rhs;
+                    state = State::Rhs;
                 }
-                Step::Rhs => {
+                State::Rhs => {
                     rhs = Some(self.parse_expr(child)?);
                 }
             }
@@ -733,21 +833,21 @@ impl<'s, 'ts> Parser<'s> {
         let mut op = None;
         let mut expr = None;
 
-        enum Step {
+        enum State {
             Op,
             Expr,
         }
 
-        let mut step = Step::Op;
+        let mut state = State::Op;
         for child in node.children(cursor) {
-            match step {
-                Step::Op => {
+            match state {
+                State::Op => {
                     let txt = self.extract_text(child);
                     let parsed_op = UnOpKind::from_str(txt).map_err(|_| self.error(node))?;
                     op = Some(parsed_op);
-                    step = Step::Expr;
+                    state = State::Expr;
                 }
-                Step::Expr => {
+                State::Expr => {
                     expr = Some(self.parse_expr(child)?);
                 }
             }
@@ -899,6 +999,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_nil() {
+        assert_parse!(
+            "local a = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "a".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::Nil]
+                }))],
+            }
+        );
+    }
+
+    #[test]
     fn parse_bools() {
         assert_parse!(
             "local a = true\nlocal b = false",
@@ -983,6 +1100,108 @@ mod tests {
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("f".to_string())),
                         args: vec![Expr::Number(3.0)]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Var(Var::Name("n".to_string()))]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_fn_and_call_in_local() {
+        assert_parse!(
+            "function f(n)\nprint(n)\nend\nlocal res = f(3)",
+            Chunk {
+                block: Block {
+                    stmt_ptrs: vec![
+                        0, // function f(n) print(n) end
+                        1, // local res = f(3)
+                    ],
+                },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            ret_ty: None,
+                            block: Block { stmt_ptrs: vec![2] },
+                            generics: vec![],
+                            params: vec![Binding {
+                                name: "n".to_string(),
+                                ty: None
+                            }],
+                        },
+                        table: None,
+                        is_method: false
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "res".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Call(Box::new(Call {
+                            func: Expr::Var(Var::Name("f".to_string())),
+                            args: vec![Expr::Number(3.0)]
+                        }))]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Var(Var::Name("n".to_string()))]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_fn_and_call_in_local_multi() {
+        assert_parse!(
+            "function f(n)\nprint(n)\nend\nlocal res1, res2 = f(3), f(4)",
+            Chunk {
+                block: Block {
+                    stmt_ptrs: vec![
+                        0, // function f(n) print(n) end
+                        1, // local res = f(3)
+                    ],
+                },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            ret_ty: None,
+                            block: Block { stmt_ptrs: vec![2] },
+                            generics: vec![],
+                            params: vec![Binding {
+                                name: "n".to_string(),
+                                ty: None
+                            }],
+                        },
+                        table: None,
+                        is_method: false
+                    })),
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![
+                            Binding {
+                                name: "res1".to_string(),
+                                ty: None
+                            },
+                            Binding {
+                                name: "res2".to_string(),
+                                ty: None
+                            }
+                        ],
+                        init: vec![
+                            Expr::Call(Box::new(Call {
+                                func: Expr::Var(Var::Name("f".to_string())),
+                                args: vec![Expr::Number(3.0)]
+                            })),
+                            Expr::Call(Box::new(Call {
+                                func: Expr::Var(Var::Name("f".to_string())),
+                                args: vec![Expr::Number(4.0)]
+                            }))
+                        ]
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
@@ -1804,6 +2023,202 @@ mod tests {
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
                         args: vec![Expr::Number(3.0)]
+                    }))
+                ]
+            }
+        );
+    }
+
+    // for tests:
+    // 1. for i = 1, 10 do print(i) end
+    // 2. for i = 1, 10, 2 do print(i) end
+    // 3. for i in a do print(i) end
+    // 4. for i, v in a do print(i, v) end
+    // 5. for i, v in a, b, c do print(i, v) end
+
+    #[test]
+    fn test_for() {
+        assert_parse!(
+            "for i = 1, 10 do\nprint(i)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::For(For {
+                        start: Expr::Number(1.0),
+                        end: Expr::Number(10.0),
+                        step: None,
+                        block: Block { stmt_ptrs: vec![1] },
+                        var: Binding {
+                            name: "i".to_string(),
+                            ty: None
+                        }
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Var(Var::Name("i".to_string()))]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_for_step() {
+        assert_parse!(
+            "for i = 1, 10, 2 do\nprint(i)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::For(For {
+                        start: Expr::Number(1.0),
+                        end: Expr::Number(10.0),
+                        step: Some(Expr::Number(2.0)),
+                        block: Block { stmt_ptrs: vec![1] },
+                        var: Binding {
+                            name: "i".to_string(),
+                            ty: None
+                        }
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Var(Var::Name("i".to_string()))]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_for_in() {
+        assert_parse!(
+            "for i in a do\nprint(i)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::ForIn(ForIn {
+                        block: Block { stmt_ptrs: vec![1] },
+                        vars: vec![Binding {
+                            name: "i".to_string(),
+                            ty: None
+                        }],
+                        exprs: vec![Expr::Var(Var::Name("a".to_string()))]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![Expr::Var(Var::Name("i".to_string()))]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_for_in_multivar_single_expr() {
+        assert_parse!(
+            "for i, v in a do\nprint(i, v)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::ForIn(ForIn {
+                        block: Block { stmt_ptrs: vec![1] },
+                        vars: vec![
+                            Binding {
+                                name: "i".to_string(),
+                                ty: None
+                            },
+                            Binding {
+                                name: "v".to_string(),
+                                ty: None
+                            }
+                        ],
+                        exprs: vec![Expr::Var(Var::Name("a".to_string()))]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![
+                            Expr::Var(Var::Name("i".to_string())),
+                            Expr::Var(Var::Name("v".to_string()))
+                        ]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_for_in_multivar_mutli_expr() {
+        assert_parse!(
+            "for i, v in a, b, c do\nprint(i, v)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::ForIn(ForIn {
+                        block: Block { stmt_ptrs: vec![1] },
+                        vars: vec![
+                            Binding {
+                                name: "i".to_string(),
+                                ty: None
+                            },
+                            Binding {
+                                name: "v".to_string(),
+                                ty: None
+                            }
+                        ],
+                        exprs: vec![
+                            Expr::Var(Var::Name("a".to_string())),
+                            Expr::Var(Var::Name("b".to_string())),
+                            Expr::Var(Var::Name("c".to_string()))
+                        ]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: vec![
+                            Expr::Var(Var::Name("i".to_string())),
+                            Expr::Var(Var::Name("v".to_string()))
+                        ]
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_anonymous_function() {
+        assert_parse!(
+            "local f = function(x, y) return x + y end\nf(1, 2)",
+            Chunk {
+                block: Block {
+                    stmt_ptrs: vec![0, 1]
+                },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::Assign(Assign {
+                        vars: vec![Var::Name("f".to_string())],
+                        exprs: vec![Expr::Function(Box::new(FunctionBody {
+                            generics: vec![],
+                            ret_ty: None,
+                            params: vec![
+                                Binding {
+                                    name: "x".to_string(),
+                                    ty: None
+                                },
+                                Binding {
+                                    name: "y".to_string(),
+                                    ty: None
+                                }
+                            ],
+                            block: Block { stmt_ptrs: vec![2] }
+                        }))]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("f".to_string())),
+                        args: vec![Expr::Number(1.0), Expr::Number(2.0)]
+                    })),
+                    StmtStatus::Some(Stmt::Return(Return {
+                        exprs: vec![Expr::BinOp(BinOp {
+                            op: BinOpKind::Add,
+                            lhs: Box::new(Expr::Var(Var::Name("x".to_string()))),
+                            rhs: Box::new(Expr::Var(Var::Name("y".to_string())))
+                        })]
                     }))
                 ]
             }
