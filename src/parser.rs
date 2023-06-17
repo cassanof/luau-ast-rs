@@ -772,7 +772,6 @@ impl<'s, 'ts> Parser<'s> {
             }
             "string" => {
                 let text = self.extract_text(node);
-                let text = text.trim_matches('"');
                 Ok(Expr::String(text.to_string()))
             }
             "boolean" => {
@@ -800,6 +799,10 @@ impl<'s, 'ts> Parser<'s> {
             "unexp" => Ok(Expr::UnOp(self.parse_unop(node, unp)?)),
             // delegate to parse_call
             "call_stmt" => Ok(Expr::Call(Box::new(self.parse_call(node, unp)?))),
+            // delegate to parse_tableconstructor
+            "table" => Ok(Expr::TableConstructor(
+                self.parse_tableconstructor(node, unp)?,
+            )),
             _ => todo!("parse_expr: {}", kind),
         }
     }
@@ -890,6 +893,84 @@ impl<'s, 'ts> Parser<'s> {
             op: op.ok_or_else(|| self.error(node))?,
             expr: Box::new(expr.ok_or_else(|| self.error(node))?),
         })
+    }
+
+    fn parse_tableconstructor(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<TableConstructor> {
+        let cursor = &mut node.walk();
+        let mut fields = Vec::new();
+
+        enum FieldState<'s, 'ts> {
+            Init,
+            ParsingExplicit(&'s str),
+            ParsingArrayNext,
+            ParsingArray(tree_sitter::Node<'ts>),
+        }
+
+        let mut parse_field = |field: tree_sitter::Node<'ts>| -> Result<TableField> {
+            let cursor = &mut field.walk();
+
+            let mut state = FieldState::Init;
+
+            for child in field.children(cursor) {
+                let kind = child.kind();
+                match (kind, &state) {
+                    ("name", FieldState::Init) => {
+                        let name = self.extract_text(child);
+                        state = FieldState::ParsingExplicit(name);
+                    }
+                    ("=", FieldState::ParsingExplicit(_) | FieldState::ParsingArray(_)) => {}
+                    (_, FieldState::ParsingExplicit(name)) => {
+                        let expr = self.parse_expr(child, unp)?;
+                        return Ok(TableField::ExplicitKey {
+                            key: name.to_string(),
+                            value: expr,
+                        });
+                    }
+                    ("[", FieldState::Init) => {
+                        state = FieldState::ParsingArrayNext;
+                    }
+                    (_, FieldState::ParsingArrayNext) => {
+                        state = FieldState::ParsingArray(child);
+                    }
+                    ("]", FieldState::ParsingArray(_)) => {}
+                    (_, FieldState::ParsingArray(key_node)) => {
+                        let key = self.parse_expr(*key_node, unp)?;
+                        let value = self.parse_expr(child, unp)?;
+                        return Ok(TableField::ArrayKey { key, value });
+                    }
+                    (_, FieldState::Init) => {
+                        let expr = self.parse_expr(child, unp)?;
+                        return Ok(TableField::ImplicitKey(expr));
+                    }
+                    _ => todo!("parse_field: {}", kind),
+                }
+            }
+            todo!("parse_field end")
+        };
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match kind {
+                "}" | "{" => {}
+                "fieldlist" => {
+                    let cursor = &mut child.walk();
+                    for field in child.children(cursor) {
+                        let kind = field.kind();
+                        match kind {
+                            "field" => fields.push(parse_field(field)?),
+                            "," | ";" => {}
+                            _ => return Err(self.error(node)),
+                        }
+                    }
+                }
+                _ => return Err(self.error(node)),
+            }
+        }
+        Ok(TableConstructor { fields })
     }
 }
 
@@ -1016,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_string() {
+    fn parse_string_double() {
         assert_parse!(
             "local a = \"hello\"",
             Chunk {
@@ -1026,7 +1107,109 @@ mod tests {
                         name: "a".to_string(),
                         ty: None
                     }],
-                    init: vec![Expr::String("hello".to_string())]
+                    init: vec![Expr::String("\"hello\"".to_string())]
+                }))],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_string_single() {
+        assert_parse!(
+            "local a = 'hello'",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "a".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::String("'hello'".to_string())]
+                }))],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_string_single_double() {
+        assert_parse!(
+            "local a = '\"hello\"'",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "a".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::String("'\"hello\"'".to_string())]
+                }))],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_string_double_single() {
+        assert_parse!(
+            "local a = \"'hello'\"",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "a".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::String("\"'hello'\"".to_string())]
+                }))],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_string_square() {
+        assert_parse!(
+            "local a = [[hello]]",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "a".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::String("[[hello]]".to_string())]
+                }))],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_string_square_double() {
+        assert_parse!(
+            "local a = [[\"hello\"]]",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "a".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::String("[[\"hello\"]]".to_string())]
+                }))],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_string_square_single() {
+        assert_parse!(
+            "local a = [['hello']]",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "a".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::String("[['hello']]".to_string())]
                 }))],
             }
         );
@@ -1541,9 +1724,9 @@ mod tests {
                             ty: None
                         }],
                         init: vec![Expr::BinOp(BinOp {
-                            lhs: Box::new(Expr::String("a".to_string())),
+                            lhs: Box::new(Expr::String("\"a\"".to_string())),
                             op: BinOpKind::Concat,
-                            rhs: Box::new(Expr::String("b".to_string()))
+                            rhs: Box::new(Expr::String("\"b\"".to_string()))
                         }),]
                     })),
                     StmtStatus::Some(Stmt::Local(Local {
@@ -1690,7 +1873,7 @@ mod tests {
                         }],
                         init: vec![Expr::UnOp(UnOp {
                             op: UnOpKind::Len,
-                            expr: Box::new(Expr::String("aaaaa".to_string()))
+                            expr: Box::new(Expr::String("\"aaaaa\"".to_string()))
                         }),]
                     })),
                 ]
@@ -2258,6 +2441,146 @@ mod tests {
                         })]
                     }))
                 ]
+            }
+        );
+    }
+
+    // tests for tableconstructor:
+    // 1. local t = {}
+    // 2. local t = {1, 2, 3}
+    // 3. local t = {a = 1, b = 2, c = 3}
+    // 4. local t = {["a"] = 1, ["b"] = 2, ["c"] = 3}
+    // 5. local t = {a = 1, 2, ["c"] = 3}
+
+    #[test]
+    fn test_tableconstructor_empty() {
+        assert_parse!(
+            "local t = {}",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "t".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::TableConstructor(TableConstructor { fields: vec![] })]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn test_tableconstructor_array() {
+        assert_parse!(
+            "local t = {1, 2, 3}",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "t".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::TableConstructor(TableConstructor {
+                        fields: vec![
+                            TableField::ImplicitKey(Expr::Number(1.0)),
+                            TableField::ImplicitKey(Expr::Number(2.0)),
+                            TableField::ImplicitKey(Expr::Number(3.0))
+                        ]
+                    })]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn test_tableconstructor_map() {
+        assert_parse!(
+            "local t = {a = 1, b = 2, c = 3}",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "t".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::TableConstructor(TableConstructor {
+                        fields: vec![
+                            TableField::ExplicitKey {
+                                key: "a".to_string(),
+                                value: Expr::Number(1.0)
+                            },
+                            TableField::ExplicitKey {
+                                key: "b".to_string(),
+                                value: Expr::Number(2.0)
+                            },
+                            TableField::ExplicitKey {
+                                key: "c".to_string(),
+                                value: Expr::Number(3.0)
+                            }
+                        ]
+                    })]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn test_tableconstructor_map_with_string_keys() {
+        assert_parse!(
+            "local t = {['a'] = 1, ['b'] = 2, ['c'] = 3}",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "t".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::TableConstructor(TableConstructor {
+                        fields: vec![
+                            TableField::ArrayKey {
+                                key: Expr::String("'a'".to_string()),
+                                value: Expr::Number(1.0)
+                            },
+                            TableField::ArrayKey {
+                                key: Expr::String("'b'".to_string()),
+                                value: Expr::Number(2.0)
+                            },
+                            TableField::ArrayKey {
+                                key: Expr::String("'c'".to_string()),
+                                value: Expr::Number(3.0)
+                            }
+                        ]
+                    })]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn test_tableconstructor_map_with_mixed_keys() {
+        assert_parse!(
+            "local t = {a = 1, 2, ['c'] = 3}",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "t".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::TableConstructor(TableConstructor {
+                        fields: vec![
+                            TableField::ExplicitKey {
+                                key: "a".to_string(),
+                                value: Expr::Number(1.0)
+                            },
+                            TableField::ImplicitKey(Expr::Number(2.0)),
+                            TableField::ArrayKey {
+                                key: Expr::String("'c'".to_string()),
+                                value: Expr::Number(3.0)
+                            }
+                        ]
+                    })]
+                }))]
             }
         );
     }

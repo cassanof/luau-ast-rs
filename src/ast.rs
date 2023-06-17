@@ -267,6 +267,12 @@ pub struct ForIn {
     pub block: Block,
 }
 
+/// Represents a table constructor expression.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableConstructor {
+    pub fields: Vec<TableField>,
+}
+
 /// Represents a statement node in the AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -302,7 +308,7 @@ pub enum Expr {
     Wrap(Box<Expr>),
     // NOTE: boxed because Call uses Expr
     Call(Box<Call>),
-    // TableConstructor(TableConstructor),
+    TableConstructor(TableConstructor),
     // NOTE: boxed because FunctionBody uses Expr
     Function(Box<FunctionBody>),
     // PrefixExp(PrefixExp),
@@ -420,4 +426,15 @@ pub enum Var {
     Name(String),
     // TableAccess(TableAccess),
     // FieldAccess(FieldAccess),
+}
+
+/// Represents a table field.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableField {
+    /// Represents a field with an explicit key. e.g. `a = 1` in `{a = 1}`.
+    ExplicitKey { key: String, value: Expr },
+    /// Represents a field with an implicit key. e.g. `1` in `{1}`.
+    ImplicitKey(Expr),
+    /// Represents a field with an array-like key. e.g. `a` in `{[a] = 1}`.
+    ArrayKey { key: Expr, value: Expr },
 }
