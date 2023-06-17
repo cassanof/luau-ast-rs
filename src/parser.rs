@@ -38,6 +38,7 @@ impl<'a> Iterator for NodeSiblingIter<'a> {
 }
 
 // TODO: write failure tests and remove ok_or_else, use unwrap_unchecked and benchmark
+// or better, write states such that they carry the data
 
 impl<'s, 'ts> Parser<'s> {
     pub fn new(text: &'s str) -> Self {
@@ -614,10 +615,9 @@ impl<'s, 'ts> Parser<'s> {
     ) -> Result<Call> {
         let cursor = &mut node.walk();
         let mut expr = None;
-        let mut args = Vec::new();
+        let mut args = None;
 
         let mut parsing_expr = true; // first child is always expr
-        let mut parsing_args = false;
 
         for child in node.children(cursor) {
             let kind = child.kind();
@@ -630,21 +630,30 @@ impl<'s, 'ts> Parser<'s> {
                     let cursor = &mut child.walk();
                     for arg in child.children(cursor) {
                         let kind = arg.kind();
-                        match kind {
-                            "(" => parsing_args = true,
-                            ")" => parsing_args = false,
-                            "," => {}
-                            _ if parsing_args => args.push(self.parse_expr(arg, unp)?),
-                            _ => todo!("parse_call (arglist): {}", kind),
+                        match (kind, &mut args) {
+                            ("(", None) => args = Some(CallArgs::Exprs(Vec::new())),
+                            (")" | ",", Some(CallArgs::Exprs(_))) => {}
+                            (_, Some(CallArgs::Exprs(exp_args))) => {
+                                exp_args.push(self.parse_expr(arg, unp)?)
+                            }
+                            ("table", None) => {
+                                args = Some(CallArgs::Table(self.parse_tableconstructor(arg, unp)?))
+                            }
+                            ("string", None) => {
+                                let txt = self.extract_text(arg);
+                                args = Some(CallArgs::String(txt.to_string()))
+                            }
+                            _ => return Err(self.error(arg)),
                         }
                     }
                 }
-                _ => todo!("parse_call: {}", kind),
+                _ => return Err(self.error(child)),
             }
         }
+
         Ok(Call {
             func: expr.ok_or_else(|| self.error(node))?,
-            args,
+            args: args.ok_or_else(|| self.error(node))?,
         })
     }
 
@@ -946,10 +955,9 @@ impl<'s, 'ts> Parser<'s> {
                         let expr = self.parse_expr(child, unp)?;
                         return Ok(TableField::ImplicitKey(expr));
                     }
-                    _ => todo!("parse_field: {}", kind),
                 }
             }
-            todo!("parse_field end")
+            Err(self.error(node))
         };
 
         for child in node.children(cursor) {
@@ -1316,11 +1324,11 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("f".to_string())),
-                        args: vec![Expr::Number(3.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(3.0)])
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Var(Var::Name("n".to_string()))]
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
                     }))
                 ]
             }
@@ -1360,12 +1368,12 @@ mod tests {
                         }],
                         init: vec![Expr::Call(Box::new(Call {
                             func: Expr::Var(Var::Name("f".to_string())),
-                            args: vec![Expr::Number(3.0)]
+                            args: CallArgs::Exprs(vec![Expr::Number(3.0)])
                         }))]
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Var(Var::Name("n".to_string()))]
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
                     }))
                 ]
             }
@@ -1412,17 +1420,17 @@ mod tests {
                         init: vec![
                             Expr::Call(Box::new(Call {
                                 func: Expr::Var(Var::Name("f".to_string())),
-                                args: vec![Expr::Number(3.0)]
+                                args: CallArgs::Exprs(vec![Expr::Number(3.0)])
                             })),
                             Expr::Call(Box::new(Call {
                                 func: Expr::Var(Var::Name("f".to_string())),
-                                args: vec![Expr::Number(4.0)]
+                                args: CallArgs::Exprs(vec![Expr::Number(4.0)])
                             }))
                         ]
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Var(Var::Name("n".to_string()))]
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
                     }))
                 ]
             }
@@ -1465,15 +1473,15 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("f".to_string())),
-                        args: vec![Expr::Number(3.0), Expr::Number(4.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(3.0), Expr::Number(4.0)])
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Var(Var::Name("a".to_string()))]
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("a".to_string()))])
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Var(Var::Name("b".to_string()))]
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("b".to_string()))])
                     }))
                 ]
             }
@@ -1503,7 +1511,7 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Var(Var::Name("n".to_string()))]
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
                     }))
                 ]
             }
@@ -1533,7 +1541,7 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Var(Var::Name("self".to_string()))]
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("self".to_string()))])
                     }))
                 ]
             }
@@ -1568,11 +1576,11 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("f".to_string())),
-                        args: vec![Expr::Number(3.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(3.0)])
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Var(Var::Name("n".to_string()))]
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
                     }))
                 ]
             }
@@ -2088,7 +2096,7 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Number(1.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
                     }))
                 ]
             }
@@ -2108,7 +2116,7 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Number(1.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
                     }))
                 ]
             }
@@ -2128,7 +2136,7 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Number(1.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
                     }))
                 ]
             }
@@ -2157,7 +2165,7 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Number(1.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
                     }))
                 ]
             }
@@ -2179,11 +2187,11 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Number(1.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Number(2.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(2.0)])
                     }))
                 ]
             }
@@ -2205,11 +2213,11 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Number(1.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Number(2.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(2.0)])
                     }))
                 ]
             }
@@ -2231,15 +2239,15 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Number(1.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Number(2.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(2.0)])
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Number(3.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(3.0)])
                     }))
                 ]
             }
@@ -2272,7 +2280,7 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Var(Var::Name("i".to_string()))]
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))])
                     }))
                 ]
             }
@@ -2298,7 +2306,7 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Var(Var::Name("i".to_string()))]
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))])
                     }))
                 ]
             }
@@ -2322,7 +2330,7 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![Expr::Var(Var::Name("i".to_string()))]
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))])
                     }))
                 ]
             }
@@ -2352,10 +2360,10 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![
+                        args: CallArgs::Exprs(vec![
                             Expr::Var(Var::Name("i".to_string())),
                             Expr::Var(Var::Name("v".to_string()))
-                        ]
+                        ])
                     }))
                 ]
             }
@@ -2389,10 +2397,10 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: vec![
+                        args: CallArgs::Exprs(vec![
                             Expr::Var(Var::Name("i".to_string())),
                             Expr::Var(Var::Name("v".to_string()))
-                        ]
+                        ])
                     }))
                 ]
             }
@@ -2431,7 +2439,7 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("f".to_string())),
-                        args: vec![Expr::Number(1.0), Expr::Number(2.0)]
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0), Expr::Number(2.0)])
                     })),
                     StmtStatus::Some(Stmt::Return(Return {
                         exprs: vec![Expr::BinOp(BinOp {
@@ -2580,6 +2588,55 @@ mod tests {
                             }
                         ]
                     })]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn test_table_call() {
+        assert_parse!(
+            "local t = f{name = 1, 2, 3}",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "t".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::Call(Box::new(Call {
+                        func: Expr::Var(Var::Name("f".to_string())),
+                        args: CallArgs::Table(TableConstructor {
+                            fields: vec![
+                                TableField::ExplicitKey {
+                                    key: "name".to_string(),
+                                    value: Expr::Number(1.0)
+                                },
+                                TableField::ImplicitKey(Expr::Number(2.0)),
+                                TableField::ImplicitKey(Expr::Number(3.0))
+                            ]
+                        })
+                    }))]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn test_string_call() {
+        assert_parse!(
+            "local t = f'hello'",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "t".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::Call(Box::new(Call {
+                        func: Expr::Var(Var::Name("f".to_string())),
+                        args: CallArgs::String("'hello'".to_string())
+                    }))]
                 }))]
             }
         );

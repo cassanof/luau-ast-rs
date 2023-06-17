@@ -160,11 +160,19 @@ pub struct LocalFunctionDef {
     pub body: FunctionBody,
 }
 
+/// Represents call arguments.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallArgs {
+    Exprs(Vec<Expr>),
+    Table(TableConstructor),
+    String(String),
+}
+
 /// Represents a function call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Call {
     pub func: Expr,
-    pub args: Vec<Expr>,
+    pub args: CallArgs,
 }
 
 /// Represents a binary operation. e.g. `a + b`, `a * b`, `a / b`, etc.
