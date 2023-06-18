@@ -2641,4 +2641,30 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn test_nested_calls() {
+        assert_parse!(
+            "local t = (f())()()",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "t".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::Call(Box::new(Call {
+                        func: Expr::Call(Box::new(Call {
+                            func: Expr::Wrap(Box::new(Expr::Call(Box::new(Call {
+                                func: Expr::Var(Var::Name("f".to_string())),
+                                args: CallArgs::Exprs(vec![])
+                            })))),
+                            args: CallArgs::Exprs(vec![])
+                        })),
+                        args: CallArgs::Exprs(vec![])
+                    }))]
+                }))]
+            }
+        );
+    }
 }
