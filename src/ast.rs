@@ -115,9 +115,7 @@ pub struct Block {
 }
 
 /// Represents a bindings in the ast. e.g. the `a` in `local a = 1`, or the
-/// `b: number` in `local b: number = 2`. This binding can also represent
-/// the variadic arguments in a function definition. e.g. `function f(...)`
-/// in that case, the name field is "...".
+/// `b: number` in `local b: number = 2`.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
