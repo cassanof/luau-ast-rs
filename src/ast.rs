@@ -1,5 +1,8 @@
 use crate::errors::ParseError;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 /// Represents the status of a statement in the AST.
 /// A status is Some when it is parsed correctly, None when it is removed from the AST by the user,
 /// PreAllocated when it is allocated but not yet parsed, and Error when it is parsed incorrectly.

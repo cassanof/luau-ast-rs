@@ -106,7 +106,13 @@ impl<'s, 'ts> Parser<'s> {
             }
         }
 
-        ParseError::SyntaxError(start, end, clipped)
+        ParseError::SyntaxError {
+            start_row: start.row,
+            start_col: start.column,
+            end_row: end.row,
+            end_col: end.column,
+            snippet: clipped,
+        }
     }
 
     fn parse_block(
