@@ -209,6 +209,7 @@ impl<'s, 'ts> Parser<'s> {
         let mut params = Vec::new();
         let mut block = None;
         let mut generics = Vec::new();
+        let mut vararg = false;
         let mut ret_ty = None;
 
         enum State {
@@ -234,7 +235,11 @@ impl<'s, 'ts> Parser<'s> {
                 (">", State::Generics) => state = State::Params,
                 (",", State::Generics | State::Params) => {}
                 ("(", State::Generics | State::Params) => state = State::Params,
-                ("param", State::Params) => params.push(self.parse_binding(node)?),
+                ("param", State::Params) => match node.child(0) {
+                    // yuck...
+                    Some(n) if n.kind() == "vararg" => vararg = true,
+                    _ => params.push(self.parse_binding(node)?),
+                },
                 (")", State::Params) => state = State::Block,
                 ("block", State::Block) => {
                     let mut unparsed_stmts = Vec::new();
@@ -250,6 +255,7 @@ impl<'s, 'ts> Parser<'s> {
         Ok(FunctionBody {
             params,
             generics,
+            vararg,
             ret_ty,
             // there may be no block if the function is empty
             block: block.unwrap_or_default(),
@@ -314,7 +320,7 @@ impl<'s, 'ts> Parser<'s> {
                     is_method = true;
                 }
                 "function" => {}
-                _ => todo!("parse_function_def: {}", kind),
+                _ => return Err(self.error(child)),
             }
         }
         Ok(FunctionDef {
@@ -1443,6 +1449,7 @@ mod tests {
                             ret_ty: None,
                             block: Block { stmt_ptrs: vec![2] },
                             generics: vec![],
+                            vararg: false,
                             params: vec![Binding {
                                 name: "n".to_string(),
                                 ty: None
@@ -1481,6 +1488,7 @@ mod tests {
                         body: FunctionBody {
                             ret_ty: None,
                             block: Block { stmt_ptrs: vec![2] },
+                            vararg: false,
                             generics: vec![],
                             params: vec![Binding {
                                 name: "n".to_string(),
@@ -1525,6 +1533,7 @@ mod tests {
                         name: "f".to_string(),
                         body: FunctionBody {
                             ret_ty: None,
+                            vararg: false,
                             block: Block { stmt_ptrs: vec![2] },
                             generics: vec![],
                             params: vec![Binding {
@@ -1582,6 +1591,7 @@ mod tests {
                         name: "f".to_string(),
                         body: FunctionBody {
                             ret_ty: None,
+                            vararg: false,
                             block: Block {
                                 stmt_ptrs: vec![2, 3]
                             },
@@ -1629,6 +1639,7 @@ mod tests {
                         body: FunctionBody {
                             generics: vec![],
                             ret_ty: None,
+                            vararg: false,
                             block: Block { stmt_ptrs: vec![1] },
                             params: vec![Binding {
                                 name: "n".to_string(),
@@ -1659,6 +1670,7 @@ mod tests {
                         body: FunctionBody {
                             generics: vec![],
                             ret_ty: None,
+                            vararg: false,
                             block: Block { stmt_ptrs: vec![1] },
                             params: vec![Binding {
                                 name: "n".to_string(),
@@ -1688,6 +1700,7 @@ mod tests {
                         name: "f".to_string(),
                         body: FunctionBody {
                             generics: vec![],
+                            vararg: false,
                             ret_ty: None,
                             block: Block { stmt_ptrs: vec![1] },
                             params: vec![Binding {
@@ -1721,6 +1734,7 @@ mod tests {
                         name: "f".to_string(),
                         body: FunctionBody {
                             ret_ty: None,
+                            vararg: false,
                             generics: vec![],
                             block: Block { stmt_ptrs: vec![1] },
                             params: vec![Binding {
@@ -1756,6 +1770,7 @@ mod tests {
                         name: "f".to_string(),
                         body: FunctionBody {
                             ret_ty: None,
+                            vararg: false,
                             generics: vec![],
                             block: Block {
                                 stmt_ptrs: vec![2], // print(n)
@@ -1789,6 +1804,7 @@ mod tests {
                     name: "f".to_string(),
                     body: FunctionBody {
                         ret_ty: None,
+                        vararg: false,
                         generics: vec![
                             GenericParam::Name("T".to_string()),
                             GenericParam::Pack("U".to_string())
@@ -1816,6 +1832,7 @@ mod tests {
                     name: "f".to_string(),
                     body: FunctionBody {
                         ret_ty: None,
+                        vararg: false,
                         generics: vec![],
                         block: Block { stmt_ptrs: vec![] },
                         params: vec![]
@@ -2194,6 +2211,7 @@ mod tests {
                         is_method: false,
                         body: FunctionBody {
                             ret_ty: None,
+                            vararg: false,
                             generics: vec![],
                             block: Block {
                                 stmt_ptrs: vec![1, 2, 3]
@@ -2228,11 +2246,9 @@ mod tests {
                         body: FunctionBody {
                             ret_ty: None,
                             generics: vec![],
+                            vararg: true,
                             block: Block { stmt_ptrs: vec![] },
-                            params: vec![Binding {
-                                name: "...".to_string(),
-                                ty: None
-                            }],
+                            params: vec![],
                         },
                     })),
                     StmtStatus::Some(Stmt::Local(Local {
@@ -2615,6 +2631,7 @@ mod tests {
                         }],
                         init: vec![Expr::Function(Box::new(FunctionBody {
                             generics: vec![],
+                            vararg: false,
                             ret_ty: None,
                             params: vec![
                                 Binding {

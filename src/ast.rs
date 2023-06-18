@@ -147,6 +147,7 @@ pub struct Assign {
 pub struct FunctionBody {
     pub params: Vec<Binding>,
     pub generics: Vec<GenericParam>,
+    pub vararg: bool,
     pub ret_ty: Option<Type>,
     pub block: Block,
 }
