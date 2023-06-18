@@ -5,8 +5,14 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+serde = ["dep:serde"]
+
 [dependencies]
 lazy_static = "1.4.0"
+serde = { version = "1.0.164", features = ["derive"], optional = true }
 thiserror = "1.0.40"
 tree-sitter = "0.20.10"
 tree-sitter-luau = { path = "./tree-sitter-luau" }
+

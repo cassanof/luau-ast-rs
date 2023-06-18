@@ -3,6 +3,7 @@ use crate::errors::ParseError;
 /// Represents the status of a statement in the AST.
 /// A status is Some when it is parsed correctly, None when it is removed from the AST by the user,
 /// PreAllocated when it is allocated but not yet parsed, and Error when it is parsed incorrectly.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtStatus {
     // TODO: annotate Some(Stmt) with comments (leading, traling)
@@ -33,6 +34,7 @@ impl StmtStatus {
 /// The Chunk struct represents the root of the AST. It contains the root of the program in the
 /// block field. All the statements in the AST are stored in the stmts vector. This struct
 /// acts as an arena for the statements in the AST.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Chunk {
     pub block: Block,
@@ -103,6 +105,7 @@ impl Chunk {
 
 /// A block represents a list of statement. The statements here are pointers to the statements
 /// that live in the chunk.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Block {
     pub stmt_ptrs: Vec<usize>,
@@ -112,6 +115,7 @@ pub struct Block {
 /// `b: number` in `local b: number = 2`. This binding can also represent
 /// the variadic arguments in a function definition. e.g. `function f(...)`
 /// in that case, the name field is "...".
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
     pub name: String,
@@ -119,6 +123,7 @@ pub struct Binding {
 }
 
 /// Represents a local variable declaration.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Local {
     pub bindings: Vec<Binding>,
@@ -126,6 +131,7 @@ pub struct Local {
 }
 
 /// Represents an assignment statement.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assign {
     pub vars: Vec<Var>,
@@ -133,6 +139,7 @@ pub struct Assign {
 }
 
 /// Represents the body of a function.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionBody {
     pub params: Vec<Binding>,
@@ -142,6 +149,7 @@ pub struct FunctionBody {
 }
 
 /// Represents a global function definition.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDef {
     /// The table that is being assigned to. e.g. `a` in `a.b = function() end`.
@@ -154,6 +162,7 @@ pub struct FunctionDef {
 }
 
 /// Represents a local function definition.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalFunctionDef {
     pub name: String,
@@ -161,6 +170,7 @@ pub struct LocalFunctionDef {
 }
 
 /// Represents call arguments.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallArgs {
     Exprs(Vec<Expr>),
@@ -169,6 +179,7 @@ pub enum CallArgs {
 }
 
 /// Represents a function call.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Call {
     pub func: Expr,
@@ -176,21 +187,24 @@ pub struct Call {
 }
 
 /// Represents a binary operation. e.g. `a + b`, `a * b`, `a / b`, etc.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinOp {
-    pub lhs: Box<Expr>,
+    pub lhs: Expr,
     pub op: BinOpKind,
-    pub rhs: Box<Expr>,
+    pub rhs: Expr,
 }
 
 /// Represents a unary operation. e.g. `-a`, `not a`, and `#` (length operator).
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnOp {
     pub op: UnOpKind,
-    pub expr: Box<Expr>,
+    pub expr: Expr,
 }
 
 /// Represents a compound operation. e.g. `a += b`, `a -= b`, `a *= b`, etc.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompOp {
     pub lhs: Var,
@@ -199,20 +213,24 @@ pub struct CompOp {
 }
 
 /// Represents a return statement.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Return {
     pub exprs: Vec<Expr>,
 }
 
 /// Represents a break statement.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Break;
 
 /// Represents a continue statement.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Continue;
 
 /// Represents a named type.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamedType {
     table: Option<String>,
@@ -221,6 +239,7 @@ pub struct NamedType {
 }
 
 /// Represents a function type
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionType {
     generics: Vec<GenericParam>,
@@ -229,12 +248,14 @@ pub struct FunctionType {
 }
 
 /// Represents a do statement.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Do {
     pub block: Block,
 }
 
 /// Represents a while statement.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct While {
     pub cond: Expr,
@@ -242,6 +263,7 @@ pub struct While {
 }
 
 /// Represents a repeat statement.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Repeat {
     pub block: Block,
@@ -249,6 +271,7 @@ pub struct Repeat {
 }
 
 /// Represents an if statement.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct If {
     pub cond: Expr,
@@ -258,6 +281,7 @@ pub struct If {
 }
 
 /// Represents a for statement.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct For {
     pub var: Binding,
@@ -268,6 +292,7 @@ pub struct For {
 }
 
 /// Represents a for in statement.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ForIn {
     pub vars: Vec<Binding>,
@@ -276,12 +301,24 @@ pub struct ForIn {
 }
 
 /// Represents a table constructor expression.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableConstructor {
     pub fields: Vec<TableField>,
 }
 
+/// Represents a ifelse expression.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct IfElseExp {
+    pub cond: Expr,
+    pub if_expr: Expr,
+    pub else_expr: Expr,
+    pub else_if_exprs: Vec<(Expr, Expr)>,
+}
+
 /// Represents a statement node in the AST.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     CompOp(CompOp),
@@ -304,6 +341,7 @@ pub enum Stmt {
 }
 
 /// Represents an expression node in the AST.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     // \ simple expressions, essentially values /
@@ -319,16 +357,16 @@ pub enum Expr {
     TableConstructor(TableConstructor),
     // NOTE: boxed because FunctionBody uses Expr
     Function(Box<FunctionBody>),
-    // PrefixExp(PrefixExp),
-    // IfElse(IfElse),
+    IfElse(Box<IfElseExp>),
     // StringInterp(StringInterp),
     // TypeAssertion(TypeAssertion),
-    BinOp(BinOp),
-    UnOp(UnOp),
+    BinOp(Box<BinOp>),
+    UnOp(Box<UnOp>),
 }
 
 /// The type of a binary operator.
 /// binop = '+' | '-' | '*' | '/' | '^' | '%' | '..' | '<' | '<=' | '>' | '>=' | '==' | '~=' | 'and' | 'or'
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinOpKind {
     Add,
@@ -350,6 +388,7 @@ pub enum BinOpKind {
 
 /// The type of a unary operator.
 /// unop = '-' | 'not' | '#'
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnOpKind {
     Neg,
@@ -359,6 +398,7 @@ pub enum UnOpKind {
 
 /// The type of a compound operator.
 /// compoundop :: '+=' | '-=' | '*=' | '/=' | '%=' | '^=' | '..='
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompOpKind {
     Add,
@@ -371,6 +411,7 @@ pub enum CompOpKind {
 }
 
 /// Represents a type node in the AST.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     // \ compounds, should be their own node but we don't care /
@@ -405,6 +446,7 @@ pub enum Type {
 }
 
 /// Represents a table property or indexer.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableProp {
     /// `[T] : U`
@@ -414,12 +456,14 @@ pub enum TableProp {
 }
 
 /// Represents a type parameter node in the AST.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeParam {
     // TODO
 }
 
 /// Represents a generic type parameter.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum GenericParam {
     /// A type parameter with a name. e.g. `T` in `function foo<T>() end`.
@@ -429,6 +473,7 @@ pub enum GenericParam {
 }
 
 /// Represents a variable node in the AST.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Var {
     Name(String),
@@ -437,6 +482,7 @@ pub enum Var {
 }
 
 /// Represents a table field.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableField {
     /// Represents a field with an explicit key. e.g. `a = 1` in `{a = 1}`.
