@@ -320,6 +320,22 @@ pub struct IfElseExp {
     pub else_if_exprs: Vec<(Expr, Expr)>,
 }
 
+/// Represents a table access operation
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableAccess {
+    pub expr: Expr,
+    pub index: Expr,
+}
+
+/// Represents a field access operation
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldAccess {
+    pub expr: Expr,
+    pub field: String,
+}
+
 /// Represents a statement node in the AST.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -480,8 +496,8 @@ pub enum GenericParam {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Var {
     Name(String),
-    // TableAccess(TableAccess),
-    // FieldAccess(FieldAccess),
+    TableAccess(Box<TableAccess>),
+    FieldAccess(Box<FieldAccess>),
 }
 
 /// Represents a table field.

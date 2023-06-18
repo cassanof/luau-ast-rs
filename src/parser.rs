@@ -685,7 +685,7 @@ impl<'s, 'ts> Parser<'s> {
             let kind = child.kind();
             match (kind, &state) {
                 ("var", State::Var) => {
-                    var = Some(self.parse_var(child)?);
+                    var = Some(self.parse_var(child, unp)?);
                     state = State::Op;
                 }
                 (_, State::Op) => {
@@ -741,7 +741,7 @@ impl<'s, 'ts> Parser<'s> {
         for child in node.children(cursor) {
             let kind = child.kind();
             match (kind, &state) {
-                ("var", State::Vars) => vars.push(self.parse_var(child)?),
+                ("var", State::Vars) => vars.push(self.parse_var(child, unp)?),
                 ("=", State::Vars) => state = State::Exprs,
                 (",", _) => {}
                 (_, State::Exprs) => exprs.push(self.parse_expr(child, unp)?),
@@ -807,7 +807,7 @@ impl<'s, 'ts> Parser<'s> {
                 self.parse_expr(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
             ))),
             // delegate to parse_var
-            "var" => Ok(Expr::Var(self.parse_var(node)?)),
+            "var" => Ok(Expr::Var(self.parse_var(node, unp)?)),
             // delegate to parse_binop
             "binexp" => Ok(Expr::BinOp(Box::new(self.parse_binop(node, unp)?))),
             // delegate to parse_unop
@@ -824,17 +824,68 @@ impl<'s, 'ts> Parser<'s> {
         }
     }
 
-    fn parse_var(&mut self, node: tree_sitter::Node<'ts>) -> Result<Var> {
-        let mut name = String::new();
+    fn parse_var(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Var> {
         let cursor = &mut node.walk();
+
+        #[derive(Debug)] // TODO: remove me
+        enum State<'ts> {
+            Init,
+            TableExpr(tree_sitter::Node<'ts>),
+            FieldExpr(tree_sitter::Node<'ts>),
+            // NOTE: we are doing this because in the grammar "var" is "name" due to a cycle
+            TableExprWasVar,
+            FieldExprWasVar,
+        }
+
+        let mut var = None;
+
+        let mut state = State::Init;
+
         for child in node.children(cursor) {
             let kind = child.kind();
-            match kind {
-                "name" => name.push_str(self.extract_text(child)),
-                _ => todo!("parse_var: {}", kind),
+            println!("parse_var {:?}: {}", state, kind);
+            match (kind, &state) {
+                ("name", State::Init) => {
+                    var = Some(Var::Name(self.extract_text(child).to_string()))
+                }
+                ("[", State::Init) if var.is_some() => state = State::TableExprWasVar,
+                (".", State::Init) if var.is_some() => state = State::FieldExprWasVar,
+                ("[", State::Init | State::TableExpr(_)) => {}
+                (".", State::TableExpr(node)) => state = State::FieldExpr(*node),
+                ("]", _) => {}
+                (_, State::TableExprWasVar) => {
+                    var = Some(Var::TableAccess(Box::new(TableAccess {
+                        expr: Expr::Var(var.take().unwrap()),
+                        index: self.parse_expr(child, unp)?,
+                    })));
+                }
+                (_, State::FieldExprWasVar) => {
+                    var = Some(Var::FieldAccess(Box::new(FieldAccess {
+                        expr: Expr::Var(var.take().unwrap()),
+                        field: self.extract_text(child).to_string(),
+                    })));
+                }
+                (_, State::TableExpr(expr_node)) => {
+                    var = Some(Var::TableAccess(Box::new(TableAccess {
+                        expr: self.parse_expr(*expr_node, unp)?,
+                        index: self.parse_expr(child, unp)?,
+                    })));
+                }
+                (_, State::FieldExpr(expr_node)) => {
+                    var = Some(Var::FieldAccess(Box::new(FieldAccess {
+                        expr: self.parse_expr(*expr_node, unp)?,
+                        field: self.extract_text(child).to_string(),
+                    })));
+                }
+                (_, State::Init) => state = State::TableExpr(child),
             }
         }
-        Ok(Var::Name(name))
+
+        var.ok_or_else(|| self.error(node))
     }
 
     fn parse_binop(
@@ -2805,6 +2856,86 @@ mod tests {
                             (Expr::Bool(false), Expr::Number(2.0))
                         ]
                     }))]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_table_access() {
+        assert_parse!(
+            "local x = t[1]",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "x".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                        expr: Expr::Var(Var::Name("t".to_string())),
+                        index: Expr::Number(1.0)
+                    })))]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_table_access2() {
+        assert_parse!(
+            "local x = (1)[1]",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "x".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                        expr: Expr::Wrap(Box::new(Expr::Number(1.0))),
+                        index: Expr::Number(1.0)
+                    })))]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_field_access1() {
+        assert_parse!(
+            "local x = t.x",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "x".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                        expr: Expr::Var(Var::Name("t".to_string())),
+                        field: "x".to_string()
+                    })))]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_field_access2() {
+        assert_parse!(
+            "local x = (1).x",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "x".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                        expr: Expr::Wrap(Box::new(Expr::Number(1.0))),
+                        field: "x".to_string()
+                    })))]
                 }))]
             }
         );
