@@ -155,12 +155,14 @@ pub struct FunctionBody {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDef {
-    /// The table that is being assigned to. e.g. `a` in `a.b = function() end`.
-    pub table: Option<String>,
+    /// The table, with possible subtables, that the function is defined
+    /// in. e.g. `a.b.c` is `vec!["a", "b", "c"]`.
+    pub table: Vec<String>,
     /// Whether the function is a method. e.g. `function a:b() end` is a method.
     pub is_method: bool,
     /// The name of the function. e.g. `a` in `function a() end`.
     pub name: String,
+    /// The body of the function.
     pub body: FunctionBody,
 }
 

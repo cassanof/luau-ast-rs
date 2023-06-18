@@ -264,11 +264,12 @@ impl<'s, 'ts> Parser<'s> {
         let cursor = &mut node.walk();
 
         // vars to fill
-        let mut table = None;
+        let mut table = Vec::new();
         let mut is_method = false;
         let mut name = String::new();
         let mut body = None;
 
+        #[derive(Debug)] // TODO: delete
         enum State {
             // we assume that a function def starts with just it's name
             Name,
@@ -277,6 +278,8 @@ impl<'s, 'ts> Parser<'s> {
         }
 
         let mut state = State::Name;
+
+        println!("parse_function_def: {}", node.to_sexp());
 
         for child in node.children(cursor) {
             let kind = child.kind();
@@ -287,9 +290,17 @@ impl<'s, 'ts> Parser<'s> {
                     }
                     State::NameWasTable => {
                         let table_name = self.extract_text(child);
-                        table = Some(std::mem::replace(&mut name, table_name.to_string()));
+                        let swapparoo = std::mem::replace(&mut name, table_name.to_string());
+                        // NOTE: we insert 0 because in the case of multiple fields, this is going
+                        // to be the last state, and we want to insert the name at the start
+                        table.insert(0, swapparoo);
                     }
                 },
+                "field" => {
+                    let table_name = self.extract_text(child);
+                    // NOTE: [1..] skips the . at the start
+                    table.push(table_name[1..].to_string());
+                }
                 "<" | "(" => {
                     let parsed_body = self.parse_fn_body(child, unp)?;
                     body = Some(parsed_body);
@@ -847,7 +858,6 @@ impl<'s, 'ts> Parser<'s> {
 
         for child in node.children(cursor) {
             let kind = child.kind();
-            println!("parse_var {:?}: {}", state, kind);
             match (kind, &state) {
                 ("name", State::Init) => {
                     var = Some(Var::Name(self.extract_text(child).to_string()))
@@ -1438,7 +1448,7 @@ mod tests {
                                 ty: None
                             }],
                         },
-                        table: None,
+                        table: vec![],
                         is_method: false
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
@@ -1477,7 +1487,7 @@ mod tests {
                                 ty: None
                             }],
                         },
-                        table: None,
+                        table: vec![],
                         is_method: false
                     })),
                     StmtStatus::Some(Stmt::Local(Local {
@@ -1522,7 +1532,7 @@ mod tests {
                                 ty: None
                             }],
                         },
-                        table: None,
+                        table: vec![],
                         is_method: false
                     })),
                     StmtStatus::Some(Stmt::Local(Local {
@@ -1587,7 +1597,7 @@ mod tests {
                                 }
                             ],
                         },
-                        table: None,
+                        table: vec![],
                         is_method: false
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
@@ -1625,7 +1635,70 @@ mod tests {
                                 ty: None
                             }],
                         },
-                        table: Some("t".to_string()),
+                        table: vec!["t".to_string()],
+                        is_method: false
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_table_fn_nested() {
+        assert_parse!(
+            "function t.a.f(n)\nprint(n)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            generics: vec![],
+                            ret_ty: None,
+                            block: Block { stmt_ptrs: vec![1] },
+                            params: vec![Binding {
+                                name: "n".to_string(),
+                                ty: None
+                            }],
+                        },
+                        table: vec!["t", "a"].iter().map(|s| s.to_string()).collect(),
+                        is_method: false
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
+                    }))
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_table_fn_nested2() {
+        assert_parse!(
+            "function t.a.b.c.f(n)\nprint(n)\nend",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            generics: vec![],
+                            ret_ty: None,
+                            block: Block { stmt_ptrs: vec![1] },
+                            params: vec![Binding {
+                                name: "n".to_string(),
+                                ty: None
+                            }],
+                        },
+                        table: vec!["t", "a", "b", "c"]
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect(),
                         is_method: false
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
@@ -1655,7 +1728,7 @@ mod tests {
                                 ty: None
                             }],
                         },
-                        table: Some("t".to_string()),
+                        table: vec!["t".to_string()],
                         is_method: true
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
@@ -1726,7 +1799,7 @@ mod tests {
                             ty: None
                         }],
                     },
-                    table: None,
+                    table: vec![],
                     is_method: false
                 })),]
             }
@@ -1747,7 +1820,7 @@ mod tests {
                         block: Block { stmt_ptrs: vec![] },
                         params: vec![]
                     },
-                    table: None,
+                    table: vec![],
                     is_method: false
                 }))]
             }
@@ -2117,7 +2190,7 @@ mod tests {
                 stmts: vec![
                     StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
                         name: "a".to_string(),
-                        table: None,
+                        table: vec![],
                         is_method: false,
                         body: FunctionBody {
                             ret_ty: None,
@@ -2150,7 +2223,7 @@ mod tests {
                 stmts: vec![
                     StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
                         name: "a".to_string(),
-                        table: None,
+                        table: vec![],
                         is_method: false,
                         body: FunctionBody {
                             ret_ty: None,
