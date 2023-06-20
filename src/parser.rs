@@ -167,7 +167,7 @@ impl<'s, 'ts> Parser<'s> {
             // \ these don't need to be parsed separately /
             "break_stmt" => Stmt::Break(Break {}),
             "continue_stmt" => Stmt::Continue(Continue {}),
-            _ => todo!("parse_stmt: {}", kind),
+            _ => return Err(self.error(node)),
         };
         Ok(stmt)
     }
@@ -194,7 +194,7 @@ impl<'s, 'ts> Parser<'s> {
                 }
                 // delegate to expr parser
                 _ if parsing_init => init.push(self.parse_expr(child, unp)?),
-                _ => todo!("parse_local: {}", kind),
+                _ => return Err(self.error(child)),
             }
         }
         Ok(Local { bindings, init })
@@ -215,6 +215,7 @@ impl<'s, 'ts> Parser<'s> {
         enum State {
             Generics,
             Params,
+            RetTy,
             Block,
         }
 
@@ -241,6 +242,11 @@ impl<'s, 'ts> Parser<'s> {
                     _ => params.push(self.parse_binding(node)?),
                 },
                 (")", State::Params) => state = State::Block,
+                (":", State::Block) => state = State::RetTy,
+                (_, State::RetTy) => {
+                    eprintln!("TODO: parse_fn_body: type ({})", kind);
+                    state = State::Block;
+                }
                 ("block", State::Block) => {
                     let mut unparsed_stmts = Vec::new();
                     let b = self.parse_block(node, &mut unparsed_stmts)?;
@@ -248,7 +254,7 @@ impl<'s, 'ts> Parser<'s> {
                     block = Some(b);
                 }
                 ("end", State::Block) => break,
-                _ => todo!("parse_fn_body: {}", kind),
+                _ => return Err(self.error(node)),
             }
         }
 
@@ -284,8 +290,6 @@ impl<'s, 'ts> Parser<'s> {
         }
 
         let mut state = State::Name;
-
-        println!("parse_function_def: {}", node.to_sexp());
 
         for child in node.children(cursor) {
             let kind = child.kind();
@@ -352,7 +356,7 @@ impl<'s, 'ts> Parser<'s> {
                     break;
                 }
                 "local" | "function" => {}
-                _ => todo!("parse_function_def: {}", kind),
+                _ => return Err(self.error(child)),
             }
         }
         Ok(LocalFunctionDef {
@@ -648,7 +652,6 @@ impl<'s, 'ts> Parser<'s> {
             let kind = child.kind();
             match kind {
                 _ if parsing_expr => {
-                    println!("parsing expr: {}", self.extract_text(child));
                     expr = Some(self.parse_expr(child, unp)?);
                     parsing_expr = false
                 }
@@ -720,7 +723,7 @@ impl<'s, 'ts> Parser<'s> {
                     state = State::Expr;
                 }
                 (_, State::Expr) => expr = Some(self.parse_expr(child, unp)?),
-                _ => todo!("parse_compop: {}", kind),
+                _ => return Err(self.error(child)),
             }
         }
 
@@ -792,7 +795,7 @@ impl<'s, 'ts> Parser<'s> {
                 _ if parsing_type => {
                     eprintln!("TODO: parse_binding (type delegation): {}", kind);
                 }
-                _ => todo!("parse_binding: {}", kind),
+                _ => return Err(self.error(child)),
             }
         }
         Ok(Binding { name, ty: None })
@@ -848,7 +851,7 @@ impl<'s, 'ts> Parser<'s> {
             "ifexp" => Ok(Expr::IfElseExpr(Box::new(self.parse_ifelseexp(node, unp)?))),
             // delegate to parse_string_interp
             "string_interp" => Ok(Expr::StringInterp(self.parse_string_interp(node, unp)?)),
-            _ => todo!("parse_expr: {}", kind),
+            _ => Err(self.error(node)),
         }
     }
 
@@ -875,7 +878,6 @@ impl<'s, 'ts> Parser<'s> {
 
         for child in node.children(cursor) {
             let kind = child.kind();
-            println!("parse_var child {:?}: {}", state, kind);
             match (kind, &state) {
                 ("name", State::Init) => {
                     var = Some(Var::Name(self.extract_text(child).to_string()))
@@ -1146,7 +1148,6 @@ impl<'s, 'ts> Parser<'s> {
                 "interp_start" | "interp_end" => {}
                 "interp_content" => {
                     let txt = self.extract_text(child);
-                    println!("interp_content: {}", txt);
                     parts.push(StringInterpPart::String(txt.to_string()));
                 }
                 "interp_exp" => {
@@ -1154,8 +1155,7 @@ impl<'s, 'ts> Parser<'s> {
                         self.parse_expr(child.child(1).ok_or_else(|| self.error(child))?, unp)?;
                     parts.push(StringInterpPart::Expr(expr));
                 }
-
-                _ => todo!("string interp: {}", kind),
+                _ => return Err(self.error(node)),
             }
         }
         Ok(StringInterp { parts })
@@ -3372,29 +3372,45 @@ mod tests {
                     }],
                     init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
                         expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                            expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
-                                expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
-                                    expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                                        expr: Expr::Var(Var::Name("t".to_string())),
-                                        field: "a".to_string()
-                                    }))),
-                                    index: Expr::Number(2.0)
-                                }))),
-                                index: Expr::Number(1.0)
-                            }))),
-                            field: "b".to_string()
-                        }))),
-                        index: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
                             expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                                expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                                    expr: Expr::Var(Var::Name("b".to_string())),
-                                    field: "c".to_string()
+                                expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                                    expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                                        expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                            expr: Expr::Var(Var::Name("t".to_string())),
+                                            field: "a".to_string()
+                                        }))),
+                                        index: Expr::Number(2.0)
+                                    }))),
+                                    index: Expr::Number(1.0)
                                 }))),
-                                field: "c".to_string()
+                                field: "b".to_string()
                             }))),
                             field: "c".to_string()
-                        })))
+                        }))),
+                        index: Expr::Number(3.0)
                     })))],
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn func_ret_type() {
+        assert_parse!(
+            "function f(): number end",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
+                    name: "f".to_string(),
+                    table: vec![],
+                    is_method: false,
+                    body: FunctionBody {
+                        params: vec![],
+                        vararg: false,
+                        generics: vec![],
+                        ret_ty: None,
+                        block: Block { stmt_ptrs: vec![] }
+                    },
                 }))]
             }
         );
