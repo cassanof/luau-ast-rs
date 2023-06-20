@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 keywords = ["lua",  "luau",  "roblox",  "ast", "parser"]
+description = "A Parser and AST for Luau and Lua5.1 written in Rust"
 exclude = [
     "tree-sitter-luau"
 ]
+repository = "https://github.com/cassanof/luau-ast-rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
