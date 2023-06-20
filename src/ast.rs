@@ -49,6 +49,14 @@ pub struct Chunk {
     pub(crate) stmts: Vec<StmtStatus>, // NOTE: pub(crate) for testing. use methods instead of accessing directly.
 }
 
+impl Iterator for Chunk {
+    type Item = StmtStatus;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.stmts.pop()
+    }
+}
+
 impl Chunk {
     /// Allocates and adds a statement to the chunk.
     pub fn add_stmt(&mut self, stmt_status: StmtStatus) -> usize {
@@ -72,6 +80,17 @@ impl Chunk {
     /// Panics if the index is out of bounds.
     pub fn get_stmt(&self, index: usize) -> &StmtStatus {
         &self.stmts[index]
+    }
+
+    /// Returns the number of statements in the chunk.
+    pub fn len(&self) -> usize {
+        self.stmts.len()
+    }
+
+    /// Returns true if the chunk is empty, has no statements.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Allocates space for a statement in the chunk, returning the pointer (as a index) to the space. The
@@ -188,6 +207,7 @@ pub enum CallArgs {
 pub struct Call {
     pub func: Expr,
     pub args: CallArgs,
+    pub method: Option<String>,
 }
 
 /// Represents a binary operation. e.g. `a + b`, `a * b`, `a / b`, etc.

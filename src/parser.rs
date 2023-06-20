@@ -639,15 +639,23 @@ impl<'s, 'ts> Parser<'s> {
         let cursor = &mut node.walk();
         let mut expr = None;
         let mut args = None;
+        let mut method = None;
 
         let mut parsing_expr = true; // first child is always expr
+        let mut has_method = false;
 
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
                 _ if parsing_expr => {
+                    println!("parsing expr: {}", self.extract_text(child));
                     expr = Some(self.parse_expr(child, unp)?);
                     parsing_expr = false
+                }
+                ":" => has_method = true,
+                "name" if has_method => {
+                    let method_name = self.extract_text(child);
+                    method = Some(method_name.to_string());
                 }
                 "arglist" => {
                     let cursor = &mut child.walk();
@@ -677,6 +685,7 @@ impl<'s, 'ts> Parser<'s> {
         Ok(Call {
             func: expr.ok_or_else(|| self.error(node))?,
             args: args.ok_or_else(|| self.error(node))?,
+            method,
         })
     }
 
@@ -781,7 +790,7 @@ impl<'s, 'ts> Parser<'s> {
                     parsing_type = true;
                 }
                 _ if parsing_type => {
-                    todo!("parse_binding (type delegation): {}", kind);
+                    eprintln!("TODO: parse_binding (type delegation): {}", kind);
                 }
                 _ => todo!("parse_binding: {}", kind),
             }
@@ -866,6 +875,7 @@ impl<'s, 'ts> Parser<'s> {
 
         for child in node.children(cursor) {
             let kind = child.kind();
+            println!("parse_var child {:?}: {}", state, kind);
             match (kind, &state) {
                 ("name", State::Init) => {
                     var = Some(Var::Name(self.extract_text(child).to_string()))
@@ -875,6 +885,10 @@ impl<'s, 'ts> Parser<'s> {
                 ("[", State::Init | State::TableExpr(_)) => {}
                 (".", State::TableExpr(node)) => state = State::FieldExpr(*node),
                 ("]", _) => {}
+                (".", State::FieldExprWasVar) => {}
+                (".", State::TableExprWasVar) => state = State::FieldExprWasVar,
+                ("[", State::TableExprWasVar) => {}
+                ("[", State::FieldExprWasVar) => state = State::TableExprWasVar,
                 (_, State::TableExprWasVar) => {
                     var = Some(Var::TableAccess(Box::new(TableAccess {
                         expr: Expr::Var(var.take().unwrap()),
@@ -1491,11 +1505,13 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("f".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(3.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(3.0)]),
+                        method: None
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                        method: None
                     }))
                 ]
             }
@@ -1536,12 +1552,14 @@ mod tests {
                         }],
                         init: vec![Expr::Call(Box::new(Call {
                             func: Expr::Var(Var::Name("f".to_string())),
-                            args: CallArgs::Exprs(vec![Expr::Number(3.0)])
+                            args: CallArgs::Exprs(vec![Expr::Number(3.0)]),
+                            method: None
                         }))]
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                        method: None
                     }))
                 ]
             }
@@ -1589,17 +1607,20 @@ mod tests {
                         init: vec![
                             Expr::Call(Box::new(Call {
                                 func: Expr::Var(Var::Name("f".to_string())),
+                                method: None,
                                 args: CallArgs::Exprs(vec![Expr::Number(3.0)])
                             })),
                             Expr::Call(Box::new(Call {
                                 func: Expr::Var(Var::Name("f".to_string())),
-                                args: CallArgs::Exprs(vec![Expr::Number(4.0)])
+                                args: CallArgs::Exprs(vec![Expr::Number(4.0)]),
+                                method: None
                             }))
                         ]
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                        method: None
                     }))
                 ]
             }
@@ -1643,15 +1664,18 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("f".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(3.0), Expr::Number(4.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(3.0), Expr::Number(4.0)]),
+                        method: None
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("a".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("a".to_string()))]),
+                        method: None
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("b".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("b".to_string()))]),
+                        method: None
                     }))
                 ]
             }
@@ -1682,7 +1706,8 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                        method: None
                     }))
                 ]
             }
@@ -1713,7 +1738,8 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                        method: None
                     }))
                 ]
             }
@@ -1747,7 +1773,8 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                        method: None
                     }))
                 ]
             }
@@ -1778,7 +1805,8 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("self".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("self".to_string()))]),
+                        method: None
                     }))
                 ]
             }
@@ -1814,11 +1842,13 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("f".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(3.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(3.0)]),
+                        method: None
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                        method: None
                     }))
                 ]
             }
@@ -2335,7 +2365,8 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                        method: None
                     }))
                 ]
             }
@@ -2355,7 +2386,8 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                        method: None
                     }))
                 ]
             }
@@ -2375,7 +2407,8 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                        method: None
                     }))
                 ]
             }
@@ -2404,7 +2437,8 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                        method: None
                     }))
                 ]
             }
@@ -2426,11 +2460,13 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                        method: None
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(2.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(2.0)]),
+                        method: None
                     }))
                 ]
             }
@@ -2452,11 +2488,13 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                        method: None
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(2.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(2.0)]),
+                        method: None
                     }))
                 ]
             }
@@ -2478,15 +2516,18 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                        method: None
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(2.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(2.0)]),
+                        method: None
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(3.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(3.0)]),
+                        method: None
                     }))
                 ]
             }
@@ -2519,7 +2560,8 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))]),
+                        method: None
                     }))
                 ]
             }
@@ -2545,7 +2587,8 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))]),
+                        method: None
                     }))
                 ]
             }
@@ -2569,7 +2612,8 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))])
+                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))]),
+                        method: None
                     }))
                 ]
             }
@@ -2602,7 +2646,8 @@ mod tests {
                         args: CallArgs::Exprs(vec![
                             Expr::Var(Var::Name("i".to_string())),
                             Expr::Var(Var::Name("v".to_string()))
-                        ])
+                        ]),
+                        method: None
                     }))
                 ]
             }
@@ -2639,7 +2684,8 @@ mod tests {
                         args: CallArgs::Exprs(vec![
                             Expr::Var(Var::Name("i".to_string())),
                             Expr::Var(Var::Name("v".to_string()))
-                        ])
+                        ]),
+                        method: None
                     }))
                 ]
             }
@@ -2679,7 +2725,8 @@ mod tests {
                     })),
                     StmtStatus::Some(Stmt::Call(Call {
                         func: Expr::Var(Var::Name("f".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0), Expr::Number(2.0)])
+                        args: CallArgs::Exprs(vec![Expr::Number(1.0), Expr::Number(2.0)]),
+                        method: None
                     })),
                     StmtStatus::Some(Stmt::Return(Return {
                         exprs: vec![Expr::BinOp(Box::new(BinOp {
@@ -2855,7 +2902,8 @@ mod tests {
                                 TableField::ImplicitKey(Expr::Number(2.0)),
                                 TableField::ImplicitKey(Expr::Number(3.0))
                             ]
-                        })
+                        }),
+                        method: None
                     }))]
                 }))]
             }
@@ -2875,7 +2923,8 @@ mod tests {
                     }],
                     init: vec![Expr::Call(Box::new(Call {
                         func: Expr::Var(Var::Name("f".to_string())),
-                        args: CallArgs::String("'hello'".to_string())
+                        args: CallArgs::String("'hello'".to_string()),
+                        method: None
                     }))]
                 }))]
             }
@@ -2897,11 +2946,14 @@ mod tests {
                         func: Expr::Call(Box::new(Call {
                             func: Expr::Wrap(Box::new(Expr::Call(Box::new(Call {
                                 func: Expr::Var(Var::Name("f".to_string())),
-                                args: CallArgs::Exprs(vec![])
+                                args: CallArgs::Exprs(vec![]),
+                                method: None
                             })))),
-                            args: CallArgs::Exprs(vec![])
+                            args: CallArgs::Exprs(vec![]),
+                            method: None
                         })),
-                        args: CallArgs::Exprs(vec![])
+                        args: CallArgs::Exprs(vec![]),
+                        method: None
                     }))]
                 }))]
             }
@@ -3180,7 +3232,8 @@ mod tests {
                                     }))),
                                     args: CallArgs::Exprs(vec![Expr::Var(Var::Name(
                                         "combos".to_string()
-                                    ))])
+                                    ))]),
+                                    method: None
                                 }))),
                                 StringInterpPart::String(". Again, ".to_string()),
                                 StringInterpPart::Expr(Expr::Call(Box::new(Call {
@@ -3191,13 +3244,158 @@ mod tests {
                                     args: CallArgs::Exprs(vec![
                                         Expr::Var(Var::Name("combos".to_string())),
                                         Expr::String("\", \"".to_string())
-                                    ])
+                                    ]),
+                                    method: None
                                 }))),
                                 StringInterpPart::String(".".to_string())
                             ]
-                        })])
+                        })]),
+                        method: None
                     }))
                 ]
+            }
+        );
+    }
+
+    #[test]
+    fn regression_1() {
+        assert_parse!(
+            "local u = workspace.TempStorage.HelperGUI",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "u".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                        expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                            expr: Expr::Var(Var::Name("workspace".to_string())),
+                            field: "TempStorage".to_string()
+                        }))),
+                        field: "HelperGUI".to_string()
+                    })))],
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn regression_2() {
+        assert_parse!(
+            "workspace.TempStorage.HelperGUI:Destroy()",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Call(Call {
+                    func: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                        expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                            expr: Expr::Var(Var::Name("workspace".to_string())),
+                            field: "TempStorage".to_string()
+                        }))),
+                        field: "HelperGUI".to_string()
+                    }))),
+                    args: CallArgs::Exprs(vec![]),
+                    method: Some("Destroy".to_string())
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn regression_3() {
+        assert_parse!(
+            "local u = workspace.TempStorage.HelperGUI.aaa.bbb",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "u".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                        expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                            expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                    expr: Expr::Var(Var::Name("workspace".to_string())),
+                                    field: "TempStorage".to_string()
+                                }))),
+                                field: "HelperGUI".to_string()
+                            }))),
+                            field: "aaa".to_string()
+                        }))),
+                        field: "bbb".to_string()
+                    })))],
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn regression_4() {
+        assert_parse!(
+            "local x = t[1][2][3][4]",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "x".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                        expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                            expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                                expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                                    expr: Expr::Var(Var::Name("t".to_string())),
+                                    index: Expr::Number(1.0)
+                                }))),
+                                index: Expr::Number(2.0)
+                            }))),
+                            index: Expr::Number(3.0)
+                        }))),
+                        index: Expr::Number(4.0)
+                    })))]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn regression_5() {
+        assert_parse!(
+            "local x = t.a[2][1].b.c[3]",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "x".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                        expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                            expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                                expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                                    expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                        expr: Expr::Var(Var::Name("t".to_string())),
+                                        field: "a".to_string()
+                                    }))),
+                                    index: Expr::Number(2.0)
+                                }))),
+                                index: Expr::Number(1.0)
+                            }))),
+                            field: "b".to_string()
+                        }))),
+                        index: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                            expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                    expr: Expr::Var(Var::Name("b".to_string())),
+                                    field: "c".to_string()
+                                }))),
+                                field: "c".to_string()
+                            }))),
+                            field: "c".to_string()
+                        })))
+                    })))],
+                }))]
             }
         );
     }
