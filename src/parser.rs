@@ -836,7 +836,7 @@ impl<'s, 'ts> Parser<'s> {
                 self.parse_tableconstructor(node, unp)?,
             )),
             // delegate to parse_ifexpr
-            "ifexp" => Ok(Expr::IfElse(Box::new(self.parse_ifelseexp(node, unp)?))),
+            "ifexp" => Ok(Expr::IfElseExpr(Box::new(self.parse_ifelseexp(node, unp)?))),
             // delegate to parse_string_interp
             "string_interp" => Ok(Expr::StringInterp(self.parse_string_interp(node, unp)?)),
             _ => todo!("parse_expr: {}", kind),
@@ -1062,7 +1062,7 @@ impl<'s, 'ts> Parser<'s> {
         &mut self,
         node: tree_sitter::Node<'ts>,
         unp: &mut UnparsedStmts<'ts>,
-    ) -> Result<IfElseExp> {
+    ) -> Result<IfElseExpr> {
         let cursor = &mut node.walk();
         let mut cond = None;
         let mut if_exp = None;
@@ -1110,7 +1110,7 @@ impl<'s, 'ts> Parser<'s> {
                 }
             }
         }
-        Ok(IfElseExp {
+        Ok(IfElseExpr {
             cond: cond.ok_or_else(|| self.error(node))?,
             if_expr: if_exp.ok_or_else(|| self.error(node))?,
             else_expr: else_expr.ok_or_else(|| self.error(node))?,
@@ -2924,7 +2924,7 @@ mod tests {
                         name: "x".to_string(),
                         ty: None
                     }],
-                    init: vec![Expr::IfElse(Box::new(IfElseExp {
+                    init: vec![Expr::IfElseExpr(Box::new(IfElseExpr {
                         cond: Expr::Bool(true),
                         if_expr: Expr::Number(1.0),
                         else_expr: Expr::Number(2.0),
@@ -2946,7 +2946,7 @@ mod tests {
                         name: "x".to_string(),
                         ty: None
                     }],
-                    init: vec![Expr::IfElse(Box::new(IfElseExp {
+                    init: vec![Expr::IfElseExpr(Box::new(IfElseExpr {
                         cond: Expr::Bool(true),
                         if_expr: Expr::Number(1.0),
                         else_expr: Expr::Number(3.0),
@@ -2968,7 +2968,7 @@ mod tests {
                         name: "x".to_string(),
                         ty: None
                     }],
-                    init: vec![Expr::IfElse(Box::new(IfElseExp {
+                    init: vec![Expr::IfElseExpr(Box::new(IfElseExpr {
                         cond: Expr::Bool(true),
                         if_expr: Expr::Number(1.0),
                         else_expr: Expr::Number(4.0),

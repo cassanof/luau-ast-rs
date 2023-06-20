@@ -314,7 +314,7 @@ pub struct TableConstructor {
 /// Represents a ifelse expression.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
-pub struct IfElseExp {
+pub struct IfElseExpr {
     pub cond: Expr,
     pub if_expr: Expr,
     pub else_expr: Expr,
@@ -384,7 +384,7 @@ pub enum Expr {
     TableConstructor(TableConstructor),
     // NOTE: boxed because FunctionBody uses Expr
     Function(Box<FunctionBody>),
-    IfElse(Box<IfElseExp>),
+    IfElseExpr(Box<IfElseExpr>),
     StringInterp(StringInterp),
     // TypeAssertion(TypeAssertion),
     BinOp(Box<BinOp>),
