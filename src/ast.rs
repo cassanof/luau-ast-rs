@@ -337,6 +337,13 @@ pub struct FieldAccess {
     pub field: String,
 }
 
+/// Represents a string interpolation operation
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct StringInterp {
+    pub parts: Vec<StringInterpPart>,
+}
+
 /// Represents a statement node in the AST.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -378,7 +385,7 @@ pub enum Expr {
     // NOTE: boxed because FunctionBody uses Expr
     Function(Box<FunctionBody>),
     IfElse(Box<IfElseExp>),
-    // StringInterp(StringInterp),
+    StringInterp(StringInterp),
     // TypeAssertion(TypeAssertion),
     BinOp(Box<BinOp>),
     UnOp(Box<UnOp>),
@@ -511,4 +518,14 @@ pub enum TableField {
     ImplicitKey(Expr),
     /// Represents a field with an array-like key. e.g. `a` in `{[a] = 1}`.
     ArrayKey { key: Expr, value: Expr },
+}
+
+/// Represents a part of a string interpolation.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum StringInterpPart {
+    /// A string literal.
+    String(String),
+    /// An expression.
+    Expr(Expr),
 }

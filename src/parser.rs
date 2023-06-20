@@ -837,6 +837,8 @@ impl<'s, 'ts> Parser<'s> {
             )),
             // delegate to parse_ifexpr
             "ifexp" => Ok(Expr::IfElse(Box::new(self.parse_ifelseexp(node, unp)?))),
+            // delegate to parse_string_interp
+            "string_interp" => Ok(Expr::StringInterp(self.parse_string_interp(node, unp)?)),
             _ => todo!("parse_expr: {}", kind),
         }
     }
@@ -1114,6 +1116,35 @@ impl<'s, 'ts> Parser<'s> {
             else_expr: else_expr.ok_or_else(|| self.error(node))?,
             else_if_exprs,
         })
+    }
+
+    fn parse_string_interp(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<StringInterp> {
+        let cursor = &mut node.walk();
+        let mut parts = Vec::new();
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match kind {
+                "interp_start" | "interp_end" => {}
+                "interp_content" => {
+                    let txt = self.extract_text(child);
+                    println!("interp_content: {}", txt);
+                    parts.push(StringInterpPart::String(txt.to_string()));
+                }
+                "interp_exp" => {
+                    let expr =
+                        self.parse_expr(child.child(1).ok_or_else(|| self.error(child))?, unp)?;
+                    parts.push(StringInterpPart::Expr(expr));
+                }
+
+                _ => todo!("string interp: {}", kind),
+            }
+        }
+        Ok(StringInterp { parts })
     }
 }
 
@@ -3027,6 +3058,146 @@ mod tests {
                         field: "x".to_string()
                     })))]
                 }))]
+            }
+        );
+    }
+
+    // string interpolation
+    // 1. local x = `hello {name}`
+    // 2. local x = `hello {name} {age}`
+    // 3. local x = `hello {1 + 2}`
+    // 4. local combos = {2, 7, 1, 8, 5}
+    //    print(`The lock combination is {table.concat(combos)}. Again, {table.concat(combos, ", ")}.`)
+
+    #[test]
+    fn test_string_interpolation() {
+        assert_parse!(
+            "local x = `hello {name}`",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "x".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::StringInterp(StringInterp {
+                        parts: vec![
+                            StringInterpPart::String("hello ".to_string()),
+                            StringInterpPart::Expr(Expr::Var(Var::Name("name".to_string())))
+                        ]
+                    })]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn test_string_interpolation2() {
+        assert_parse!(
+            "local x = `hello {name} {age}`",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "x".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::StringInterp(StringInterp {
+                        parts: vec![
+                            StringInterpPart::String("hello ".to_string()),
+                            StringInterpPart::Expr(Expr::Var(Var::Name("name".to_string()))),
+                            StringInterpPart::String(" ".to_string()),
+                            StringInterpPart::Expr(Expr::Var(Var::Name("age".to_string())))
+                        ]
+                    })]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn test_string_interpolation3() {
+        assert_parse!(
+            "local x = `hello {1 + 2}`",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "x".to_string(),
+                        ty: None
+                    }],
+                    init: vec![Expr::StringInterp(StringInterp {
+                        parts: vec![
+                            StringInterpPart::String("hello ".to_string()),
+                            StringInterpPart::Expr(Expr::BinOp(Box::new(BinOp {
+                                op: BinOpKind::Add,
+                                lhs: Expr::Number(1.0),
+                                rhs: Expr::Number(2.0)
+                            })))
+                        ]
+                    })]
+                }))]
+            }
+        );
+    }
+
+    #[test]
+    fn test_string_interpolation4() {
+        assert_parse!(
+            r#"
+            local combos = {2, 7, 1, 8, 5}
+            print(`The lock combination is {table.concat(combos)}. Again, {table.concat(combos, ", ")}.`)
+            "#,
+            Chunk {
+                block: Block {
+                    stmt_ptrs: vec![0, 1]
+                },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "combos".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::TableConstructor(TableConstructor {
+                            fields: vec![
+                                TableField::ImplicitKey(Expr::Number(2.0)),
+                                TableField::ImplicitKey(Expr::Number(7.0)),
+                                TableField::ImplicitKey(Expr::Number(1.0)),
+                                TableField::ImplicitKey(Expr::Number(8.0)),
+                                TableField::ImplicitKey(Expr::Number(5.0))
+                            ]
+                        })]
+                    })),
+                    StmtStatus::Some(Stmt::Call(Call {
+                        func: Expr::Var(Var::Name("print".to_string())),
+                        args: CallArgs::Exprs(vec![Expr::StringInterp(StringInterp {
+                            parts: vec![
+                                StringInterpPart::String("The lock combination is ".to_string()),
+                                StringInterpPart::Expr(Expr::Call(Box::new(Call {
+                                    func: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                        expr: Expr::Var(Var::Name("table".to_string())),
+                                        field: "concat".to_string()
+                                    }))),
+                                    args: CallArgs::Exprs(vec![Expr::Var(Var::Name(
+                                        "combos".to_string()
+                                    ))])
+                                }))),
+                                StringInterpPart::String(". Again, ".to_string()),
+                                StringInterpPart::Expr(Expr::Call(Box::new(Call {
+                                    func: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                        expr: Expr::Var(Var::Name("table".to_string())),
+                                        field: "concat".to_string()
+                                    }))),
+                                    args: CallArgs::Exprs(vec![
+                                        Expr::Var(Var::Name("combos".to_string())),
+                                        Expr::String("\", \"".to_string())
+                                    ])
+                                }))),
+                                StringInterpPart::String(".".to_string())
+                            ]
+                        })])
+                    }))
+                ]
             }
         );
     }
