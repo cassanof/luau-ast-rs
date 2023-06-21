@@ -4266,4 +4266,15 @@ end
             }
         );
     }
+
+    #[test]
+    fn lone_comment() {
+        assert_parse!(
+            "-- lonely, i'm so lonely...",
+            Chunk {
+                block: Block::default(),
+                stmts: vec![]
+            }
+        );
+    }
 }
