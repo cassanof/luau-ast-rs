@@ -96,14 +96,21 @@ impl Chunk {
     /// Adds a comment to the statement at the given index.
     ///
     /// # Panics
-    /// If the given index is out of bounds, or if the statement at the given index is not Some.
+    /// If the given index is out of bounds, or if the statement at the given index is not Some,
+    /// except if it is an Error, in which case it is ignored and the comment is not added.
     pub fn add_comment(&mut self, index: usize, comment: Comment) {
         match &mut self.stmts[index] {
             StmtStatus::Some(_, comments) => {
                 comments.push(comment);
             }
-            _ => panic!(
-                "Cannot add comment to statement that is not Some (ptr: {})",
+            // ignore error case
+            StmtStatus::Error(_) => {}
+            StmtStatus::None => panic!(
+                "Cannot add comment to statement that is None (ptr: {})",
+                index
+            ),
+            StmtStatus::PreAllocated => panic!(
+                "Cannot add comment to statement that is PreAllocated (ptr: {})",
                 index
             ),
         }
