@@ -178,9 +178,7 @@ impl<'s, 'ts> Parser<'s> {
                     continue;
                 }
                 ";" => continue,
-                _ => {
-                    println!("kind: {}", kind)
-                }
+                _ => {}
             }
 
             let stmt_ptr = self.chunk.alloc();
