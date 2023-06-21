@@ -753,6 +753,7 @@ impl<'s, 'ts> Parser<'s> {
                         match (kind, &mut args) {
                             ("(", None) => args = Some(CallArgs::Exprs(Vec::new())),
                             (")" | ",", Some(CallArgs::Exprs(_))) => {}
+                            ("comment", _) => self.parse_comment_tr(arg),
                             (_, Some(CallArgs::Exprs(exp_args))) => {
                                 exp_args.push(self.parse_expr(arg, unp)?)
                             }
@@ -1160,7 +1161,7 @@ impl<'s, 'ts> Parser<'s> {
                         match kind {
                             "field" => fields.push(self.parse_field(field, unp)?),
                             "," | ";" => {}
-                            "comment" => self.parse_comment_tr(child),
+                            "comment" => self.parse_comment_tr(field),
                             _ => return Err(self.error(node)),
                         }
                     }
