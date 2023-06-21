@@ -102,7 +102,10 @@ impl Chunk {
             StmtStatus::Some(_, comments) => {
                 comments.push(comment);
             }
-            _ => panic!("Cannot add comment to statement that is not Some"),
+            _ => panic!(
+                "Cannot add comment to statement that is not Some (ptr: {})",
+                index
+            ),
         }
     }
 
