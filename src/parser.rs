@@ -900,25 +900,9 @@ impl<'s, 'ts> Parser<'s> {
         let kind = node.kind();
         match kind {
             "nil" => Ok(Expr::Nil),
-            "number" => {
-                let text = self.extract_text(node);
-                let num = text.parse().map_err(|_| self.error(node))?;
-                Ok(Expr::Number(num))
-            }
-            "string" => {
-                let text = self.extract_text(node);
-                Ok(Expr::String(text.to_string()))
-            }
-            "boolean" => {
-                // true is 4 bytes, false is 5 bytes. hack! no need for text :^)
-                let start = node.start_byte();
-                let end = node.end_byte();
-
-                // lets just make sure lol (only in debug mode)
-                debug_assert!(matches!(&self.text[start..end], "true" | "false"));
-
-                Ok(Expr::Bool(end - start == 4))
-            }
+            "number" => Ok(Expr::Number(self.parse_number(node)?)),
+            "string" => Ok(Expr::String(self.extract_text(node).to_string())),
+            "boolean" => Ok(Expr::Bool(self.parse_bool(node)?)),
             "anon_fn" => Ok(Expr::Function(Box::new(
                 self.parse_fn_body(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
             ))),
@@ -944,6 +928,28 @@ impl<'s, 'ts> Parser<'s> {
             "string_interp" => Ok(Expr::StringInterp(self.parse_string_interp(node, unp)?)),
             _ => Err(self.error(node)),
         }
+    }
+
+    fn parse_number(&mut self, node: tree_sitter::Node<'ts>) -> Result<f64> {
+        let text = self.extract_text(node).replace('_', "");
+        let num = if let Some(strip) = text.strip_prefix("0x") {
+            (i64::from_str_radix(strip, 16).map_err(|_| self.error(node))?) as f64
+        } else if let Some(strip) = text.strip_prefix("0b") {
+            (i64::from_str_radix(strip, 2).map_err(|_| self.error(node))?) as f64
+        } else {
+            text.parse().map_err(|_| self.error(node))?
+        };
+        Ok(num)
+    }
+
+    fn parse_bool(&mut self, node: tree_sitter::Node<'ts>) -> Result<bool> {
+        // true is 4 bytes, false is 5 bytes. hack! no need for text :^)
+        let start = node.start_byte();
+        let end = node.end_byte();
+
+        // lets just make sure lol (only in debug mode)
+        debug_assert!(matches!(&self.text[start..end], "true" | "false"));
+        Ok(end - start == 4)
     }
 
     fn parse_var(
@@ -4135,6 +4141,66 @@ mod tests {
                 stmts: vec![StmtStatus::Some(
                     Stmt::Return(Return {
                         exprs: vec![Expr::Number(1.0), Expr::Number(2.0),]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn regression_9() {
+        assert_parse!(
+            "return chr == 0x5F",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Return(Return {
+                        exprs: vec![Expr::BinOp(Box::new(BinOp {
+                            lhs: Expr::Var(Var::Name("chr".to_string())),
+                            op: BinOpKind::Eq,
+                            rhs: Expr::Number(0x5F as f64)
+                        }))]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn regression_10() {
+        assert_parse!(
+            "return chr == 0b100",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Return(Return {
+                        exprs: vec![Expr::BinOp(Box::new(BinOp {
+                            lhs: Expr::Var(Var::Name("chr".to_string())),
+                            op: BinOpKind::Eq,
+                            rhs: Expr::Number(0b100 as f64)
+                        }))]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn regression_11() {
+        assert_parse!(
+            "return chr == 100_000_000",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Return(Return {
+                        exprs: vec![Expr::BinOp(Box::new(BinOp {
+                            lhs: Expr::Var(Var::Name("chr".to_string())),
+                            op: BinOpKind::Eq,
+                            rhs: Expr::Number(100_000_000.0)
+                        }))]
                     }),
                     vec![]
                 )]
