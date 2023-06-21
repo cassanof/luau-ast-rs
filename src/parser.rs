@@ -559,6 +559,7 @@ impl<'s, 'ts> Parser<'s> {
         let mut else_if_blocks = Vec::new();
         let mut else_block = None;
 
+        #[derive(Debug)]
         enum State {
             Condition,
             Else,
@@ -578,11 +579,7 @@ impl<'s, 'ts> Parser<'s> {
                     cond = Some(self.parse_expr(child, unp)?);
                     state = State::Block;
                 }
-                (_, State::Block) => {
-                    if_block = Some(self.parse_block(child, unp)?);
-                    state = State::Else;
-                }
-                ("else_clause", State::Else) => {
+                ("else_clause", State::Else | State::Block) => {
                     else_block = Some(
                         child
                             .child(1)
@@ -590,7 +587,7 @@ impl<'s, 'ts> Parser<'s> {
                             .unwrap_or_else(|| Ok(Block::default()))?,
                     );
                 }
-                ("elseif_clause", State::Else) => {
+                ("elseif_clause", State::Else | State::Block) => {
                     let cond_node = child.child(1).ok_or_else(|| self.error(child))?;
                     let cond = self.parse_expr(cond_node, unp)?;
                     let b = child
@@ -598,6 +595,10 @@ impl<'s, 'ts> Parser<'s> {
                         .map(|n| self.parse_block(n, unp))
                         .unwrap_or_else(|| Ok(Block::default()))?;
                     else_if_blocks.push((cond, b));
+                }
+                (_, State::Block) => {
+                    if_block = Some(self.parse_block(child, unp)?);
+                    state = State::Else;
                 }
                 _ => return Err(self.error(child)),
             }
@@ -4204,6 +4205,64 @@ mod tests {
                     }),
                     vec![]
                 )]
+            }
+        );
+    }
+
+    #[test]
+    fn regression_12() {
+        assert_parse!(
+            r#"
+ if not cacheSize then
+elseif cacheSize < 0 or cacheSize ~= cacheSize then
+  error("cache size cannot be a negative number or a NaN", 2);
+end
+            "#,
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(
+                        Stmt::If(If {
+                            cond: Expr::UnOp(Box::new(UnOp {
+                                op: UnOpKind::Not,
+                                expr: Expr::Var(Var::Name("cacheSize".to_string())),
+                            })),
+                            block: Block { stmt_ptrs: vec![] },
+                            else_if_blocks: vec![(
+                                Expr::BinOp(Box::new(BinOp {
+                                    lhs: Expr::BinOp(Box::new(BinOp {
+                                        lhs: Expr::Var(Var::Name("cacheSize".to_string())),
+                                        op: BinOpKind::Lt,
+                                        rhs: Expr::Number(0.0),
+                                    })),
+                                    op: BinOpKind::Or,
+                                    rhs: Expr::BinOp(Box::new(BinOp {
+                                        lhs: Expr::Var(Var::Name("cacheSize".to_string())),
+                                        op: BinOpKind::Ne,
+                                        rhs: Expr::Var(Var::Name("cacheSize".to_string())),
+                                    })),
+                                })),
+                                Block { stmt_ptrs: vec![1] },
+                            )],
+                            else_block: None,
+                        }),
+                        vec![],
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("error".to_string())),
+                            args: CallArgs::Exprs(vec![
+                                Expr::String(
+                                    "\"cache size cannot be a negative number or a NaN\""
+                                        .to_string()
+                                ),
+                                Expr::Number(2.0),
+                            ]),
+                            method: None,
+                        }),
+                        vec![],
+                    ),
+                ],
             }
         );
     }
