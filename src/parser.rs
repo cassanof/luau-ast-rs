@@ -170,9 +170,17 @@ impl<'s, 'ts> Parser<'s> {
         let mut prev_ptr = 0;
 
         for child in node.children(cursor) {
-            if child.kind() == "comment" {
-                comments.push(child);
-                continue;
+            // some edge cases
+            let kind = child.kind();
+            match kind {
+                "comment" => {
+                    comments.push(child);
+                    continue;
+                }
+                ";" => continue,
+                _ => {
+                    println!("kind: {}", kind)
+                }
             }
 
             let stmt_ptr = self.chunk.alloc();
@@ -825,7 +833,7 @@ impl<'s, 'ts> Parser<'s> {
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
-                "return" | "," => {}
+                "return" | "," | ";" => {}
                 "comment" => self.parse_comment_tr(child),
                 _ => exprs.push(self.parse_expr(child, unp)?),
             }
@@ -4087,10 +4095,48 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![StmtStatus::Some(
-                    Stmt::Return(Return { exprs: vec![
-                        Expr::Number(1.0),
-                        Expr::Number(2.0),
-                    ] }),
+                    Stmt::Return(Return {
+                        exprs: vec![Expr::Number(1.0), Expr::Number(2.0),]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn regression_7() {
+        assert_parse!(
+            "local character = Tool.Parent;",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "character".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                            expr: Expr::Var(Var::Name("Tool".to_string())),
+                            field: "Parent".to_string()
+                        })))]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn regression_8() {
+        assert_parse!(
+            "return 1, 2;",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Return(Return {
+                        exprs: vec![Expr::Number(1.0), Expr::Number(2.0),]
+                    }),
                     vec![]
                 )]
             }
