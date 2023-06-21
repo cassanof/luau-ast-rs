@@ -263,6 +263,7 @@ impl<'s, 'ts> Parser<'s> {
                 "=" => {
                     parsing_init = true;
                 }
+                "comment" => self.parse_comment_tr(child),
                 // delegate to expr parser
                 _ if parsing_init => init.push(self.parse_expr(child, unp)?),
                 _ => return Err(self.error(child)),
@@ -295,7 +296,6 @@ impl<'s, 'ts> Parser<'s> {
         for node in (NodeSiblingIter { node: Some(node) }) {
             let kind = node.kind();
             match (kind, &state) {
-                ("comment", _) => self.parse_comment_tr(node),
                 ("<", State::Generics) => {}
                 ("generic", State::Generics) => {
                     let txt = self.extract_text(node);
@@ -311,10 +311,12 @@ impl<'s, 'ts> Parser<'s> {
                 ("param", State::Params) => match node.child(0) {
                     // yuck...
                     Some(n) if n.kind() == "vararg" => vararg = true,
+                    Some(n) if n.kind() == "comment" => self.parse_comment_tr(n),
                     _ => params.push(self.parse_binding(node)?),
                 },
                 (")", State::Params) => state = State::Block,
                 (":", State::Block) => state = State::RetTy,
+                ("comment", _) => self.parse_comment_tr(node),
                 (_, State::RetTy) => {
                     eprintln!("TODO: parse_fn_body: type ({})", kind);
                     state = State::Block;
@@ -351,7 +353,6 @@ impl<'s, 'ts> Parser<'s> {
         let mut name = String::new();
         let mut body = None;
 
-        #[derive(Debug)] // TODO: delete
         enum State {
             // we assume that a function def starts with just it's name
             Name,
@@ -394,6 +395,7 @@ impl<'s, 'ts> Parser<'s> {
                     is_method = true;
                 }
                 "function" => {}
+                "comment" => self.parse_comment_tr(child),
                 _ => return Err(self.error(child)),
             }
         }
@@ -426,6 +428,7 @@ impl<'s, 'ts> Parser<'s> {
                     break;
                 }
                 "local" | "function" => {}
+                "comment" => self.parse_comment_tr(child),
                 _ => return Err(self.error(child)),
             }
         }
@@ -451,6 +454,7 @@ impl<'s, 'ts> Parser<'s> {
                     let b = self.parse_block(child, unp)?;
                     block = Some(b);
                 }
+                "comment" => self.parse_comment_tr(child),
                 _ => return Err(self.error(child)),
             }
         }
@@ -480,6 +484,7 @@ impl<'s, 'ts> Parser<'s> {
             let kind = child.kind();
             match kind {
                 "while" | "do" | "end" => {}
+                "comment" => self.parse_comment_tr(child),
                 _ if matches!(state, State::Condition) => {
                     cond = Some(self.parse_expr(child, unp)?);
                     state = State::Block;
@@ -523,6 +528,7 @@ impl<'s, 'ts> Parser<'s> {
                     block = Some(b);
                     state = State::Condition;
                 }
+                "comment" => self.parse_comment_tr(child),
                 _ if matches!(state, State::Condition) => {
                     cond = Some(self.parse_expr(child, unp)?);
                 }
@@ -561,6 +567,7 @@ impl<'s, 'ts> Parser<'s> {
                 ("end", _) => {}
                 ("if", State::Condition) => {}
                 ("then", State::Block | State::Else) => {}
+                ("comment", _) => self.parse_comment_tr(child),
                 (_, State::Condition) => {
                     cond = Some(self.parse_expr(child, unp)?);
                     state = State::Block;
@@ -630,6 +637,7 @@ impl<'s, 'ts> Parser<'s> {
                     state = State::Start;
                 }
                 ("=", State::Start) => {}
+                ("comment", _) => self.parse_comment_tr(child),
                 (_, State::Start) => {
                     start = Some(self.parse_expr(child, unp)?);
                     state = State::End;
@@ -688,6 +696,7 @@ impl<'s, 'ts> Parser<'s> {
                     vars.push(self.parse_binding(child)?);
                 }
                 (",", State::Expr | State::Var) => {}
+                ("comment", _) => self.parse_comment_tr(child),
                 (_, State::Expr) => {
                     exprs.push(self.parse_expr(child, unp)?);
                 }
@@ -721,6 +730,7 @@ impl<'s, 'ts> Parser<'s> {
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
+                "comment" => self.parse_comment_tr(child),
                 _ if parsing_expr => {
                     expr = Some(self.parse_expr(child, unp)?);
                     parsing_expr = false
@@ -787,6 +797,7 @@ impl<'s, 'ts> Parser<'s> {
                     var = Some(self.parse_var(child, unp)?);
                     state = State::Op;
                 }
+                ("comment", _) => self.parse_comment_tr(child),
                 (_, State::Op) => {
                     let txt = self.extract_text(child);
                     op = Some(CompOpKind::from_str(txt).map_err(|_| self.error(child))?);
@@ -815,6 +826,7 @@ impl<'s, 'ts> Parser<'s> {
             let kind = child.kind();
             match kind {
                 "return" => {}
+                "comment" => self.parse_comment_tr(child),
                 _ => exprs.push(self.parse_expr(child, unp)?),
             }
         }
@@ -843,6 +855,7 @@ impl<'s, 'ts> Parser<'s> {
                 ("var", State::Vars) => vars.push(self.parse_var(child, unp)?),
                 ("=", State::Vars) => state = State::Exprs,
                 (",", _) => {}
+                ("comment", _) => self.parse_comment_tr(child),
                 (_, State::Exprs) => exprs.push(self.parse_expr(child, unp)?),
                 _ => return Err(self.error(child)),
             }
@@ -851,7 +864,7 @@ impl<'s, 'ts> Parser<'s> {
         Ok(Assign { vars, exprs })
     }
 
-    fn parse_binding(&self, node: tree_sitter::Node<'ts>) -> Result<Binding> {
+    fn parse_binding(&mut self, node: tree_sitter::Node<'ts>) -> Result<Binding> {
         let cursor = &mut node.walk();
         let mut name = String::new();
         let mut parsing_type = false;
@@ -862,6 +875,7 @@ impl<'s, 'ts> Parser<'s> {
                 ":" => {
                     parsing_type = true;
                 }
+                "comment" => self.parse_comment_tr(child),
                 _ if parsing_type => {
                     eprintln!("TODO: parse_binding (type delegation): {}", kind);
                 }
@@ -932,7 +946,6 @@ impl<'s, 'ts> Parser<'s> {
     ) -> Result<Var> {
         let cursor = &mut node.walk();
 
-        #[derive(Debug)] // TODO: remove me
         enum State<'ts> {
             Init,
             TableExpr(tree_sitter::Node<'ts>),
@@ -961,6 +974,7 @@ impl<'s, 'ts> Parser<'s> {
                 (".", State::TableExprWasVar) => state = State::FieldExprWasVar,
                 ("[", State::TableExprWasVar) => {}
                 ("[", State::FieldExprWasVar) => state = State::TableExprWasVar,
+                ("comment", _) => self.parse_comment_tr(child),
                 (_, State::TableExprWasVar) => {
                     var = Some(Var::TableAccess(Box::new(TableAccess {
                         expr: Expr::Var(var.take().unwrap()),
@@ -1011,6 +1025,7 @@ impl<'s, 'ts> Parser<'s> {
         let mut state = State::Lhs;
         for child in node.children(cursor) {
             match state {
+                _ if child.kind() == "comment" => self.parse_comment_tr(child),
                 State::Lhs => {
                     lhs = Some(self.parse_expr(child, unp)?);
                     state = State::Op;
@@ -1050,6 +1065,7 @@ impl<'s, 'ts> Parser<'s> {
         let mut state = State::Op;
         for child in node.children(cursor) {
             match state {
+                _ if child.kind() == "comment" => self.parse_comment_tr(child),
                 State::Op => {
                     let txt = self.extract_text(child);
                     let parsed_op = UnOpKind::from_str(txt).map_err(|_| self.error(node))?;
@@ -1067,13 +1083,12 @@ impl<'s, 'ts> Parser<'s> {
         })
     }
 
-    fn parse_tableconstructor(
+    fn parse_field(
         &mut self,
         node: tree_sitter::Node<'ts>,
         unp: &mut UnparsedStmts<'ts>,
-    ) -> Result<TableConstructor> {
+    ) -> Result<TableField> {
         let cursor = &mut node.walk();
-        let mut fields = Vec::new();
 
         enum FieldState<'s, 'ts> {
             Init,
@@ -1082,46 +1097,51 @@ impl<'s, 'ts> Parser<'s> {
             ParsingArray(tree_sitter::Node<'ts>),
         }
 
-        let mut parse_field = |field: tree_sitter::Node<'ts>| -> Result<TableField> {
-            let cursor = &mut field.walk();
+        let mut state = FieldState::Init;
 
-            let mut state = FieldState::Init;
-
-            for child in field.children(cursor) {
-                let kind = child.kind();
-                match (kind, &state) {
-                    ("name", FieldState::Init) => {
-                        let name = self.extract_text(child);
-                        state = FieldState::ParsingExplicit(name);
-                    }
-                    ("=", FieldState::ParsingExplicit(_) | FieldState::ParsingArray(_)) => {}
-                    (_, FieldState::ParsingExplicit(name)) => {
-                        let expr = self.parse_expr(child, unp)?;
-                        return Ok(TableField::ExplicitKey {
-                            key: name.to_string(),
-                            value: expr,
-                        });
-                    }
-                    ("[", FieldState::Init) => {
-                        state = FieldState::ParsingArrayNext;
-                    }
-                    (_, FieldState::ParsingArrayNext) => {
-                        state = FieldState::ParsingArray(child);
-                    }
-                    ("]", FieldState::ParsingArray(_)) => {}
-                    (_, FieldState::ParsingArray(key_node)) => {
-                        let key = self.parse_expr(*key_node, unp)?;
-                        let value = self.parse_expr(child, unp)?;
-                        return Ok(TableField::ArrayKey { key, value });
-                    }
-                    (_, FieldState::Init) => {
-                        let expr = self.parse_expr(child, unp)?;
-                        return Ok(TableField::ImplicitKey(expr));
-                    }
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &state) {
+                ("name", FieldState::Init) => {
+                    let name = self.extract_text(child);
+                    state = FieldState::ParsingExplicit(name);
+                }
+                ("=", FieldState::ParsingExplicit(_) | FieldState::ParsingArray(_)) => {}
+                (_, FieldState::ParsingExplicit(name)) => {
+                    let expr = self.parse_expr(child, unp)?;
+                    return Ok(TableField::ExplicitKey {
+                        key: name.to_string(),
+                        value: expr,
+                    });
+                }
+                ("[", FieldState::Init) => {
+                    state = FieldState::ParsingArrayNext;
+                }
+                (_, FieldState::ParsingArrayNext) => {
+                    state = FieldState::ParsingArray(child);
+                }
+                ("]", FieldState::ParsingArray(_)) => {}
+                (_, FieldState::ParsingArray(key_node)) => {
+                    let key = self.parse_expr(*key_node, unp)?;
+                    let value = self.parse_expr(child, unp)?;
+                    return Ok(TableField::ArrayKey { key, value });
+                }
+                (_, FieldState::Init) => {
+                    let expr = self.parse_expr(child, unp)?;
+                    return Ok(TableField::ImplicitKey(expr));
                 }
             }
-            Err(self.error(node))
-        };
+        }
+        Err(self.error(node))
+    }
+
+    fn parse_tableconstructor(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<TableConstructor> {
+        let cursor = &mut node.walk();
+        let mut fields = Vec::new();
 
         for child in node.children(cursor) {
             let kind = child.kind();
@@ -1132,15 +1152,18 @@ impl<'s, 'ts> Parser<'s> {
                     for field in child.children(cursor) {
                         let kind = field.kind();
                         match kind {
-                            "field" => fields.push(parse_field(field)?),
+                            "field" => fields.push(self.parse_field(field, unp)?),
                             "," | ";" => {}
+                            "comment" => self.parse_comment_tr(child),
                             _ => return Err(self.error(node)),
                         }
                     }
                 }
+                "comment" => self.parse_comment_tr(child),
                 _ => return Err(self.error(node)),
             }
         }
+
         Ok(TableConstructor { fields })
     }
 
@@ -1170,6 +1193,7 @@ impl<'s, 'ts> Parser<'s> {
             match (kind, &state) {
                 ("if", State::Condition) => {}
                 ("then", State::Body | State::ElseBody | State::ElseIfCondition(_)) => {}
+                ("comment", _) => self.parse_comment_tr(child),
                 (_, State::Condition) => {
                     cond = Some(self.parse_expr(child, unp)?);
                     state = State::Body;
