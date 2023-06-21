@@ -1,8 +1,8 @@
 use lazy_static::lazy_static;
 
 pub mod ast;
-pub mod parser;
 pub mod errors;
+pub mod parser;
 pub mod visitor;
 
 lazy_static! {

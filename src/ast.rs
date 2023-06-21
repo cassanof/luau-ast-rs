@@ -10,28 +10,28 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtStatus {
     // TODO: annotate Some(Stmt) with comments (leading, traling)
-    Some(Stmt),
+    Some(Stmt, Vec<Comment>),
     None,
     PreAllocated,
     Error(ParseError),
 }
 
-impl StmtStatus {
-    #[inline]
-    #[track_caller]
-    pub fn unwrap(self) -> Stmt {
-        match self {
-            StmtStatus::Some(stmt) => stmt,
-            StmtStatus::None => panic!("called `StmtStatus::unwrap()` on a `None` value"),
-            StmtStatus::PreAllocated => {
-                panic!("called `StmtStatus::unwrap()` on a `PreAllocated` value")
-            }
-            StmtStatus::Error(err) => panic!(
-                "called `StmtStatus::unwrap()` on an `Error` value: {:?}",
-                err
-            ),
-        }
-    }
+/// Represents a comment in the AST. We don't care much about the exact position of the comment, so we
+/// aggregate them with the statement they are attached to.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum Comment {
+    /// Comment that is trailing the statement. e.g. `local x = 1 -- trailing comment`
+    /// Comments that are inside the statement also count as trailing comments.
+    /// e.g. `local x --[[ trailing comment ]] = 1`
+    Trailing(String),
+    /// Comment that is leading the statement.
+    /// e.g.
+    /// ```lua
+    /// -- leading comment
+    /// local x = 1
+    /// ```
+    Leading(String),
 }
 
 /// The Chunk struct represents the root of the AST. It contains the root of the program in the
@@ -91,6 +91,19 @@ impl Chunk {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Adds a comment to the statement at the given index.
+    ///
+    /// # Panics
+    /// If the given index is out of bounds, or if the statement at the given index is not Some.
+    pub fn add_comment(&mut self, index: usize, comment: Comment) {
+        match &mut self.stmts[index] {
+            StmtStatus::Some(_, comments) => {
+                comments.push(comment);
+            }
+            _ => panic!("Cannot add comment to statement that is not Some"),
+        }
     }
 
     /// Allocates space for a statement in the chunk, returning the pointer (as a index) to the space. The

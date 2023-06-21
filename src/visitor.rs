@@ -8,7 +8,7 @@ macro_rules! trait_visitor {
         fn visit_chunk(&mut self, _chunk: $($ref)+ Chunk) {}
         fn visit_block(&mut self, _block: $($ref)+ Block) {}
         fn visit_parse_error(&mut self, _error: $($ref)+ ParseError) {}
-        fn visit_stmt(&mut self, _stmt: $($ref)+ Stmt) {}
+        fn visit_stmt(&mut self, _stmt: $($ref)+ Stmt, _coms: $($ref)+ [Comment]) {}
         fn visit_comp_op(&mut self, _comp_op: $($ref)+ CompOp) {}
         fn visit_bin_op(&mut self, _bin_op: $($ref)+ BinOp) {}
         fn visit_un_op(&mut self, _un_op: $($ref)+ UnOp) {}
@@ -70,7 +70,7 @@ macro_rules! impl_visitor_driver {
             while let Some(stmt_ptr) = unvisited_stmts.pop() {
                 let stmt_status = $($ref)+ chunk.stmts[stmt_ptr];
                 match stmt_status {
-                    StmtStatus::Some(s) => self.drive_stmt(s, &mut unvisited_stmts),
+                    StmtStatus::Some(s, c) => self.drive_stmt(s, c, &mut unvisited_stmts),
                     StmtStatus::None => {} // was removed, nothing to do
                     StmtStatus::PreAllocated => panic!("PreAllocated stmts should not be visited"),
                     StmtStatus::Error(p) => self.visitor.visit_parse_error(p),
@@ -85,8 +85,8 @@ macro_rules! impl_visitor_driver {
             }
         }
 
-        fn drive_stmt(&mut self, stmt: $($ref)+ Stmt, unv: &mut UnvisitedStmts) {
-            self.visitor.visit_stmt(stmt);
+        fn drive_stmt(&mut self, stmt: $($ref)+ Stmt, coms: $($ref)+ [Comment], unv: &mut UnvisitedStmts) {
+            self.visitor.visit_stmt(stmt, coms);
             match stmt {
                 Stmt::CompOp(s) => self.drive_comp_op(s, unv),
                 Stmt::Call(s) => self.drive_call(s, unv),

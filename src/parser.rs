@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::str::FromStr;
 
 use crate::ast::*;
@@ -14,14 +15,18 @@ pub struct Parser<'s> {
     ts: tree_sitter::Parser,
     text: &'s str,
     chunk: Chunk,
+    acc_trailing_comments: Vec<Comment>,
 }
 
 struct StmtToBeParsed<'ts> {
     ptr: usize,
+    prev_stmt: Option<tree_sitter::Node<'ts>>,
+    prev_ptr: usize,
     node: tree_sitter::Node<'ts>,
+    comment_nodes: Vec<tree_sitter::Node<'ts>>,
 }
 
-type UnparsedStmts<'ts> = Vec<StmtToBeParsed<'ts>>;
+type UnparsedStmts<'ts> = VecDeque<StmtToBeParsed<'ts>>;
 
 struct NodeSiblingIter<'a> {
     node: Option<tree_sitter::Node<'a>>,
@@ -47,20 +52,56 @@ impl<'s, 'ts> Parser<'s> {
             ts,
             text,
             chunk: Chunk::default(),
+            acc_trailing_comments: Vec::new(),
         }
     }
 
     pub fn parse(mut self) -> Result<Chunk> {
         let tree = self.ts.parse(self.text, None).ok_or(ParseError::TSError)?;
         let root = tree.root_node();
-        let mut to_be_parsed = Vec::new();
+        let mut to_be_parsed = VecDeque::new();
         let block = self.parse_block(root, &mut to_be_parsed)?;
         self.chunk.block = block;
 
-        while let Some(StmtToBeParsed { ptr, node }) = to_be_parsed.pop() {
+        while let Some(StmtToBeParsed {
+            ptr,
+            prev_stmt,
+            prev_ptr,
+            node,
+            comment_nodes,
+        }) = to_be_parsed.pop_front()
+        {
             match self.parse_stmt(node, &mut to_be_parsed) {
                 Ok(stmt) => {
-                    self.chunk.set_stmt(ptr, StmtStatus::Some(stmt));
+                    // resolve comments
+                    let mut comms = Vec::new();
+                    for node in comment_nodes {
+                        let txt = self.extract_text(node).to_string();
+
+                        match prev_stmt {
+                            Some(prev_stmt) => {
+                                let comm_start_row = node.start_position().row;
+                                let comm_end_row = node.end_position().row;
+                                let prev_start_row = prev_stmt.start_position().row;
+                                let prev_end_row = prev_stmt.end_position().row;
+
+                                if comm_start_row >= prev_start_row && comm_end_row <= prev_end_row
+                                {
+                                    // this is a trailing comment of the previous statement
+                                    let comm = Comment::Trailing(txt);
+                                    self.chunk.add_comment(prev_ptr, comm);
+                                } else {
+                                    // just a leading comment of this statement
+                                    comms.push(Comment::Leading(txt));
+                                }
+                            }
+                            None => comms.push(Comment::Leading(txt)),
+                        };
+                    }
+
+                    // add all the accumulated trailing comments
+                    comms.append(&mut self.acc_trailing_comments);
+                    self.chunk.set_stmt(ptr, StmtStatus::Some(stmt, comms));
                 }
                 Err(err) => {
                     self.chunk.set_stmt(ptr, StmtStatus::Error(err));
@@ -120,17 +161,47 @@ impl<'s, 'ts> Parser<'s> {
         node: tree_sitter::Node<'ts>,
         unp: &mut UnparsedStmts<'ts>,
     ) -> Result<Block> {
-        let mut stmts = Vec::new();
         let cursor = &mut node.walk();
+
+        let mut stmts = Vec::new();
+        let mut comments = Vec::new();
+
+        let mut prev_stmt = None;
+        let mut prev_ptr = 0;
+
         for child in node.children(cursor) {
+            if child.kind() == "comment" {
+                comments.push(child);
+                continue;
+            }
+
             let stmt_ptr = self.chunk.alloc();
             stmts.push(stmt_ptr);
-            unp.push(StmtToBeParsed {
+
+            unp.push_back(StmtToBeParsed {
                 ptr: stmt_ptr,
+                prev_stmt,
+                prev_ptr,
                 node: child,
+                comment_nodes: comments.drain(..).collect(),
             });
+
+            prev_stmt = Some(child);
+            prev_ptr = stmt_ptr;
         }
+
+        // parse the remaining comments
+        for comment in comments {
+            self.parse_comment_tr(comment);
+        }
+
         Ok(Block { stmt_ptrs: stmts })
+    }
+
+    fn parse_comment_tr(&mut self, node: tree_sitter::Node<'ts>) {
+        let text = self.extract_text(node);
+        let comment = Comment::Trailing(text.to_string());
+        self.acc_trailing_comments.push(comment);
     }
 
     fn parse_stmt(
@@ -224,6 +295,7 @@ impl<'s, 'ts> Parser<'s> {
         for node in (NodeSiblingIter { node: Some(node) }) {
             let kind = node.kind();
             match (kind, &state) {
+                ("comment", _) => self.parse_comment_tr(node),
                 ("<", State::Generics) => {}
                 ("generic", State::Generics) => {
                     let txt = self.extract_text(node);
@@ -248,9 +320,7 @@ impl<'s, 'ts> Parser<'s> {
                     state = State::Block;
                 }
                 ("block", State::Block) => {
-                    let mut unparsed_stmts = Vec::new();
-                    let b = self.parse_block(node, &mut unparsed_stmts)?;
-                    unp.extend(unparsed_stmts);
+                    let b = self.parse_block(node, unp)?;
                     block = Some(b);
                 }
                 ("end", State::Block) => break,
@@ -1242,26 +1312,32 @@ mod tests {
                     stmt_ptrs: vec![0, 1]
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "a".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::Number(1.0)]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![
-                            Binding {
-                                name: "b".to_string(),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "a".to_string(),
                                 ty: None
-                            },
-                            Binding {
-                                name: "c".to_string(),
-                                ty: None
-                            }
-                        ],
-                        init: vec![Expr::Number(2.0), Expr::Number(3.0)]
-                    }))
+                            }],
+                            init: vec![Expr::Number(1.0)]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![
+                                Binding {
+                                    name: "b".to_string(),
+                                    ty: None
+                                },
+                                Binding {
+                                    name: "c".to_string(),
+                                    ty: None
+                                }
+                            ],
+                            init: vec![Expr::Number(2.0), Expr::Number(3.0)]
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -1273,13 +1349,16 @@ mod tests {
             "local a",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "a".to_string(),
-                        ty: None
-                    }],
-                    init: vec![]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -1290,13 +1369,16 @@ mod tests {
             "local a = \"hello\"",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "a".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::String("\"hello\"".to_string())]
-                }))],
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::String("\"hello\"".to_string())]
+                    }),
+                    vec![]
+                )],
             }
         );
     }
@@ -1307,13 +1389,16 @@ mod tests {
             "local a = 'hello'",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "a".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::String("'hello'".to_string())]
-                }))],
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::String("'hello'".to_string())]
+                    }),
+                    vec![]
+                )],
             }
         );
     }
@@ -1324,13 +1409,16 @@ mod tests {
             "local a = '\"hello\"'",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "a".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::String("'\"hello\"'".to_string())]
-                }))],
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::String("'\"hello\"'".to_string())]
+                    }),
+                    vec![]
+                )],
             }
         );
     }
@@ -1341,13 +1429,16 @@ mod tests {
             "local a = \"'hello'\"",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "a".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::String("\"'hello'\"".to_string())]
-                }))],
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::String("\"'hello'\"".to_string())]
+                    }),
+                    vec![]
+                )],
             }
         );
     }
@@ -1358,13 +1449,16 @@ mod tests {
             "local a = [[hello]]",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "a".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::String("[[hello]]".to_string())]
-                }))],
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::String("[[hello]]".to_string())]
+                    }),
+                    vec![]
+                )],
             }
         );
     }
@@ -1375,13 +1469,16 @@ mod tests {
             "local a = [[\"hello\"]]",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "a".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::String("[[\"hello\"]]".to_string())]
-                }))],
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::String("[[\"hello\"]]".to_string())]
+                    }),
+                    vec![]
+                )],
             }
         );
     }
@@ -1392,13 +1489,16 @@ mod tests {
             "local a = [['hello']]",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "a".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::String("[['hello']]".to_string())]
-                }))],
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::String("[['hello']]".to_string())]
+                    }),
+                    vec![]
+                )],
             }
         );
     }
@@ -1409,13 +1509,16 @@ mod tests {
             "local a = nil",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "a".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::Nil]
-                }))],
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "a".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )],
             }
         );
     }
@@ -1429,20 +1532,26 @@ mod tests {
                     stmt_ptrs: vec![0, 1]
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "a".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::Bool(true)]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "b".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::Bool(false)]
-                    }))
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "a".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::Bool(true)]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "b".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::Bool(false)]
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -1457,20 +1566,26 @@ mod tests {
                     stmt_ptrs: vec![0, 1]
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "a".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::Number(1.0)]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "b".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::Var(Var::Name("a".to_string()))]
-                    }))
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "a".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::Number(1.0)]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "b".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::Var(Var::Name("a".to_string()))]
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -1488,31 +1603,40 @@ mod tests {
                     ],
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                        name: "f".to_string(),
-                        body: FunctionBody {
-                            ret_ty: None,
-                            block: Block { stmt_ptrs: vec![2] },
-                            generics: vec![],
-                            vararg: false,
-                            params: vec![Binding {
-                                name: "n".to_string(),
-                                ty: None
-                            }],
-                        },
-                        table: vec![],
-                        is_method: false
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("f".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(3.0)]),
-                        method: None
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::FunctionDef(FunctionDef {
+                            name: "f".to_string(),
+                            body: FunctionBody {
+                                ret_ty: None,
+                                block: Block { stmt_ptrs: vec![2] },
+                                generics: vec![],
+                                vararg: false,
+                                params: vec![Binding {
+                                    name: "n".to_string(),
+                                    ty: None
+                                }],
+                            },
+                            table: vec![],
+                            is_method: false
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("f".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(3.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -1530,37 +1654,46 @@ mod tests {
                     ],
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                        name: "f".to_string(),
-                        body: FunctionBody {
-                            ret_ty: None,
-                            block: Block { stmt_ptrs: vec![2] },
-                            vararg: false,
-                            generics: vec![],
-                            params: vec![Binding {
-                                name: "n".to_string(),
+                    StmtStatus::Some(
+                        Stmt::FunctionDef(FunctionDef {
+                            name: "f".to_string(),
+                            body: FunctionBody {
+                                ret_ty: None,
+                                block: Block { stmt_ptrs: vec![2] },
+                                vararg: false,
+                                generics: vec![],
+                                params: vec![Binding {
+                                    name: "n".to_string(),
+                                    ty: None
+                                }],
+                            },
+                            table: vec![],
+                            is_method: false
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "res".to_string(),
                                 ty: None
                             }],
-                        },
-                        table: vec![],
-                        is_method: false
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "res".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::Call(Box::new(Call {
-                            func: Expr::Var(Var::Name("f".to_string())),
-                            args: CallArgs::Exprs(vec![Expr::Number(3.0)]),
+                            init: vec![Expr::Call(Box::new(Call {
+                                func: Expr::Var(Var::Name("f".to_string())),
+                                args: CallArgs::Exprs(vec![Expr::Number(3.0)]),
+                                method: None
+                            }))]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
                             method: None
-                        }))]
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
-                        method: None
-                    }))
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -1578,50 +1711,59 @@ mod tests {
                     ],
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                        name: "f".to_string(),
-                        body: FunctionBody {
-                            ret_ty: None,
-                            vararg: false,
-                            block: Block { stmt_ptrs: vec![2] },
-                            generics: vec![],
-                            params: vec![Binding {
-                                name: "n".to_string(),
-                                ty: None
-                            }],
-                        },
-                        table: vec![],
-                        is_method: false
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![
-                            Binding {
-                                name: "res1".to_string(),
-                                ty: None
+                    StmtStatus::Some(
+                        Stmt::FunctionDef(FunctionDef {
+                            name: "f".to_string(),
+                            body: FunctionBody {
+                                ret_ty: None,
+                                vararg: false,
+                                block: Block { stmt_ptrs: vec![2] },
+                                generics: vec![],
+                                params: vec![Binding {
+                                    name: "n".to_string(),
+                                    ty: None
+                                }],
                             },
-                            Binding {
-                                name: "res2".to_string(),
-                                ty: None
-                            }
-                        ],
-                        init: vec![
-                            Expr::Call(Box::new(Call {
-                                func: Expr::Var(Var::Name("f".to_string())),
-                                method: None,
-                                args: CallArgs::Exprs(vec![Expr::Number(3.0)])
-                            })),
-                            Expr::Call(Box::new(Call {
-                                func: Expr::Var(Var::Name("f".to_string())),
-                                args: CallArgs::Exprs(vec![Expr::Number(4.0)]),
-                                method: None
-                            }))
-                        ]
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
-                        method: None
-                    }))
+                            table: vec![],
+                            is_method: false
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![
+                                Binding {
+                                    name: "res1".to_string(),
+                                    ty: None
+                                },
+                                Binding {
+                                    name: "res2".to_string(),
+                                    ty: None
+                                }
+                            ],
+                            init: vec![
+                                Expr::Call(Box::new(Call {
+                                    func: Expr::Var(Var::Name("f".to_string())),
+                                    method: None,
+                                    args: CallArgs::Exprs(vec![Expr::Number(3.0)])
+                                })),
+                                Expr::Call(Box::new(Call {
+                                    func: Expr::Var(Var::Name("f".to_string())),
+                                    args: CallArgs::Exprs(vec![Expr::Number(4.0)]),
+                                    method: None
+                                }))
+                            ]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -1639,44 +1781,56 @@ mod tests {
                     ],
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                        name: "f".to_string(),
-                        body: FunctionBody {
-                            ret_ty: None,
-                            vararg: false,
-                            block: Block {
-                                stmt_ptrs: vec![2, 3]
-                            },
-                            generics: vec![],
-                            params: vec![
-                                Binding {
-                                    name: "a".to_string(),
-                                    ty: None
+                    StmtStatus::Some(
+                        Stmt::FunctionDef(FunctionDef {
+                            name: "f".to_string(),
+                            body: FunctionBody {
+                                ret_ty: None,
+                                vararg: false,
+                                block: Block {
+                                    stmt_ptrs: vec![2, 3]
                                 },
-                                Binding {
-                                    name: "b".to_string(),
-                                    ty: None
-                                }
-                            ],
-                        },
-                        table: vec![],
-                        is_method: false
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("f".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(3.0), Expr::Number(4.0)]),
-                        method: None
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("a".to_string()))]),
-                        method: None
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("b".to_string()))]),
-                        method: None
-                    }))
+                                generics: vec![],
+                                params: vec![
+                                    Binding {
+                                        name: "a".to_string(),
+                                        ty: None
+                                    },
+                                    Binding {
+                                        name: "b".to_string(),
+                                        ty: None
+                                    }
+                                ],
+                            },
+                            table: vec![],
+                            is_method: false
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("f".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(3.0), Expr::Number(4.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("a".to_string()))]),
+                            method: None
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("b".to_string()))]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -1689,26 +1843,32 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                        name: "f".to_string(),
-                        body: FunctionBody {
-                            generics: vec![],
-                            ret_ty: None,
-                            vararg: false,
-                            block: Block { stmt_ptrs: vec![1] },
-                            params: vec![Binding {
-                                name: "n".to_string(),
-                                ty: None
-                            }],
-                        },
-                        table: vec!["t".to_string()],
-                        is_method: false
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::FunctionDef(FunctionDef {
+                            name: "f".to_string(),
+                            body: FunctionBody {
+                                generics: vec![],
+                                ret_ty: None,
+                                vararg: false,
+                                block: Block { stmt_ptrs: vec![1] },
+                                params: vec![Binding {
+                                    name: "n".to_string(),
+                                    ty: None
+                                }],
+                            },
+                            table: vec!["t".to_string()],
+                            is_method: false
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -1721,26 +1881,32 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                        name: "f".to_string(),
-                        body: FunctionBody {
-                            generics: vec![],
-                            ret_ty: None,
-                            vararg: false,
-                            block: Block { stmt_ptrs: vec![1] },
-                            params: vec![Binding {
-                                name: "n".to_string(),
-                                ty: None
-                            }],
-                        },
-                        table: vec!["t", "a"].iter().map(|s| s.to_string()).collect(),
-                        is_method: false
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::FunctionDef(FunctionDef {
+                            name: "f".to_string(),
+                            body: FunctionBody {
+                                generics: vec![],
+                                ret_ty: None,
+                                vararg: false,
+                                block: Block { stmt_ptrs: vec![1] },
+                                params: vec![Binding {
+                                    name: "n".to_string(),
+                                    ty: None
+                                }],
+                            },
+                            table: vec!["t", "a"].iter().map(|s| s.to_string()).collect(),
+                            is_method: false
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -1753,29 +1919,35 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                        name: "f".to_string(),
-                        body: FunctionBody {
-                            generics: vec![],
-                            vararg: false,
-                            ret_ty: None,
-                            block: Block { stmt_ptrs: vec![1] },
-                            params: vec![Binding {
-                                name: "n".to_string(),
-                                ty: None
-                            }],
-                        },
-                        table: vec!["t", "a", "b", "c"]
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect(),
-                        is_method: false
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::FunctionDef(FunctionDef {
+                            name: "f".to_string(),
+                            body: FunctionBody {
+                                generics: vec![],
+                                vararg: false,
+                                ret_ty: None,
+                                block: Block { stmt_ptrs: vec![1] },
+                                params: vec![Binding {
+                                    name: "n".to_string(),
+                                    ty: None
+                                }],
+                            },
+                            table: vec!["t", "a", "b", "c"]
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect(),
+                            is_method: false
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -1788,26 +1960,32 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                        name: "f".to_string(),
-                        body: FunctionBody {
-                            ret_ty: None,
-                            vararg: false,
-                            generics: vec![],
-                            block: Block { stmt_ptrs: vec![1] },
-                            params: vec![Binding {
-                                name: "n".to_string(),
-                                ty: None
-                            }],
-                        },
-                        table: vec!["t".to_string()],
-                        is_method: true
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("self".to_string()))]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::FunctionDef(FunctionDef {
+                            name: "f".to_string(),
+                            body: FunctionBody {
+                                ret_ty: None,
+                                vararg: false,
+                                generics: vec![],
+                                block: Block { stmt_ptrs: vec![1] },
+                                params: vec![Binding {
+                                    name: "n".to_string(),
+                                    ty: None
+                                }],
+                            },
+                            table: vec!["t".to_string()],
+                            is_method: true
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("self".to_string()))]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -1825,31 +2003,40 @@ mod tests {
                     ],
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::LocalFunctionDef(LocalFunctionDef {
-                        name: "f".to_string(),
-                        body: FunctionBody {
-                            ret_ty: None,
-                            vararg: false,
-                            generics: vec![],
-                            block: Block {
-                                stmt_ptrs: vec![2], // print(n)
-                            },
-                            params: vec![Binding {
-                                name: "n".to_string(),
-                                ty: None
-                            }],
-                        }
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("f".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(3.0)]),
-                        method: None
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::LocalFunctionDef(LocalFunctionDef {
+                            name: "f".to_string(),
+                            body: FunctionBody {
+                                ret_ty: None,
+                                vararg: false,
+                                generics: vec![],
+                                block: Block {
+                                    stmt_ptrs: vec![2], // print(n)
+                                },
+                                params: vec![Binding {
+                                    name: "n".to_string(),
+                                    ty: None
+                                }],
+                            }
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("f".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(3.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("n".to_string()))]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -1861,24 +2048,27 @@ mod tests {
             "function f<T, U...>(n) end",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                    name: "f".to_string(),
-                    body: FunctionBody {
-                        ret_ty: None,
-                        vararg: false,
-                        generics: vec![
-                            GenericParam::Name("T".to_string()),
-                            GenericParam::Pack("U".to_string())
-                        ],
-                        block: Block { stmt_ptrs: vec![] },
-                        params: vec![Binding {
-                            name: "n".to_string(),
-                            ty: None
-                        }],
-                    },
-                    table: vec![],
-                    is_method: false
-                })),]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            ret_ty: None,
+                            vararg: false,
+                            generics: vec![
+                                GenericParam::Name("T".to_string()),
+                                GenericParam::Pack("U".to_string())
+                            ],
+                            block: Block { stmt_ptrs: vec![] },
+                            params: vec![Binding {
+                                name: "n".to_string(),
+                                ty: None
+                            }],
+                        },
+                        table: vec![],
+                        is_method: false
+                    }),
+                    vec![]
+                ),]
             }
         );
     }
@@ -1889,18 +2079,21 @@ mod tests {
             "function f() end",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                    name: "f".to_string(),
-                    body: FunctionBody {
-                        ret_ty: None,
-                        vararg: false,
-                        generics: vec![],
-                        block: Block { stmt_ptrs: vec![] },
-                        params: vec![]
-                    },
-                    table: vec![],
-                    is_method: false
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            ret_ty: None,
+                            vararg: false,
+                            generics: vec![],
+                            block: Block { stmt_ptrs: vec![] },
+                            params: vec![]
+                        },
+                        table: vec![],
+                        is_method: false
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -1930,171 +2123,216 @@ mod tests {
                     stmt_ptrs: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "plus".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Number(1.0),
-                            op: BinOpKind::Add,
-                            rhs: Expr::Number(2.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "minus".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Number(1.0),
-                            op: BinOpKind::Sub,
-                            rhs: Expr::Number(2.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "mul".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Number(1.0),
-                            op: BinOpKind::Mul,
-                            rhs: Expr::Number(2.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "div".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Number(1.0),
-                            op: BinOpKind::Div,
-                            rhs: Expr::Number(2.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "mod".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Number(1.0),
-                            op: BinOpKind::Mod,
-                            rhs: Expr::Number(2.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "pow".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Number(1.0),
-                            op: BinOpKind::Pow,
-                            rhs: Expr::Number(2.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "concat".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::String("\"a\"".to_string()),
-                            op: BinOpKind::Concat,
-                            rhs: Expr::String("\"b\"".to_string())
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "eq".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Number(1.0),
-                            op: BinOpKind::Eq,
-                            rhs: Expr::Number(2.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "neq".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Number(1.0),
-                            op: BinOpKind::Ne,
-                            rhs: Expr::Number(2.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "lt".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Number(1.0),
-                            op: BinOpKind::Lt,
-                            rhs: Expr::Number(2.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "gt".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Number(1.0),
-                            op: BinOpKind::Gt,
-                            rhs: Expr::Number(2.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "leq".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Number(1.0),
-                            op: BinOpKind::Le,
-                            rhs: Expr::Number(2.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "geq".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Number(1.0),
-                            op: BinOpKind::Ge,
-                            rhs: Expr::Number(2.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "and".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Bool(true),
-                            op: BinOpKind::And,
-                            rhs: Expr::Bool(false)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "or".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Bool(true),
-                            op: BinOpKind::Or,
-                            rhs: Expr::Bool(false)
-                        })),]
-                    })),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "plus".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Number(1.0),
+                                op: BinOpKind::Add,
+                                rhs: Expr::Number(2.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "minus".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Number(1.0),
+                                op: BinOpKind::Sub,
+                                rhs: Expr::Number(2.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "mul".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Number(1.0),
+                                op: BinOpKind::Mul,
+                                rhs: Expr::Number(2.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "div".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Number(1.0),
+                                op: BinOpKind::Div,
+                                rhs: Expr::Number(2.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "mod".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Number(1.0),
+                                op: BinOpKind::Mod,
+                                rhs: Expr::Number(2.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "pow".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Number(1.0),
+                                op: BinOpKind::Pow,
+                                rhs: Expr::Number(2.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "concat".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::String("\"a\"".to_string()),
+                                op: BinOpKind::Concat,
+                                rhs: Expr::String("\"b\"".to_string())
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "eq".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Number(1.0),
+                                op: BinOpKind::Eq,
+                                rhs: Expr::Number(2.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "neq".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Number(1.0),
+                                op: BinOpKind::Ne,
+                                rhs: Expr::Number(2.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "lt".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Number(1.0),
+                                op: BinOpKind::Lt,
+                                rhs: Expr::Number(2.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "gt".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Number(1.0),
+                                op: BinOpKind::Gt,
+                                rhs: Expr::Number(2.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "leq".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Number(1.0),
+                                op: BinOpKind::Le,
+                                rhs: Expr::Number(2.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "geq".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Number(1.0),
+                                op: BinOpKind::Ge,
+                                rhs: Expr::Number(2.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "and".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Bool(true),
+                                op: BinOpKind::And,
+                                rhs: Expr::Bool(false)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "or".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::Bool(true),
+                                op: BinOpKind::Or,
+                                rhs: Expr::Bool(false)
+                            })),]
+                        }),
+                        vec![]
+                    ),
                 ]
             }
         );
@@ -2114,46 +2352,58 @@ mod tests {
                     stmt_ptrs: vec![0, 1, 2, 3],
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "not".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::UnOp(Box::new(UnOp {
-                            op: UnOpKind::Not,
-                            expr: Expr::Bool(true)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "neg".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::UnOp(Box::new(UnOp {
-                            op: UnOpKind::Neg,
-                            expr: Expr::Number(1.0)
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "neg_wrap".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::UnOp(Box::new(UnOp {
-                            op: UnOpKind::Neg,
-                            expr: Expr::Wrap(Box::new(Expr::Number(1.0)))
-                        })),]
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "len".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::UnOp(Box::new(UnOp {
-                            op: UnOpKind::Len,
-                            expr: Expr::String("\"aaaaa\"".to_string())
-                        })),]
-                    })),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "not".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::UnOp(Box::new(UnOp {
+                                op: UnOpKind::Not,
+                                expr: Expr::Bool(true)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "neg".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::UnOp(Box::new(UnOp {
+                                op: UnOpKind::Neg,
+                                expr: Expr::Number(1.0)
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "neg_wrap".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::UnOp(Box::new(UnOp {
+                                op: UnOpKind::Neg,
+                                expr: Expr::Wrap(Box::new(Expr::Number(1.0)))
+                            })),]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "len".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::UnOp(Box::new(UnOp {
+                                op: UnOpKind::Len,
+                                expr: Expr::String("\"aaaaa\"".to_string())
+                            })),]
+                        }),
+                        vec![]
+                    ),
                 ]
             }
         );
@@ -2177,48 +2427,72 @@ mod tests {
                     stmt_ptrs: vec![0, 1, 2, 3, 4, 5, 6, 7],
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "guinea_pig".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::Number(1.0)]
-                    })),
-                    StmtStatus::Some(Stmt::CompOp(CompOp {
-                        lhs: Var::Name("guinea_pig".to_string()),
-                        op: CompOpKind::Add,
-                        rhs: Box::new(Expr::Number(1.0))
-                    })),
-                    StmtStatus::Some(Stmt::CompOp(CompOp {
-                        lhs: Var::Name("guinea_pig".to_string()),
-                        op: CompOpKind::Sub,
-                        rhs: Box::new(Expr::Number(1.0))
-                    })),
-                    StmtStatus::Some(Stmt::CompOp(CompOp {
-                        lhs: Var::Name("guinea_pig".to_string()),
-                        op: CompOpKind::Mul,
-                        rhs: Box::new(Expr::Number(1.0))
-                    })),
-                    StmtStatus::Some(Stmt::CompOp(CompOp {
-                        lhs: Var::Name("guinea_pig".to_string()),
-                        op: CompOpKind::Div,
-                        rhs: Box::new(Expr::Number(1.0))
-                    })),
-                    StmtStatus::Some(Stmt::CompOp(CompOp {
-                        lhs: Var::Name("guinea_pig".to_string()),
-                        op: CompOpKind::Mod,
-                        rhs: Box::new(Expr::Number(1.0))
-                    })),
-                    StmtStatus::Some(Stmt::CompOp(CompOp {
-                        lhs: Var::Name("guinea_pig".to_string()),
-                        op: CompOpKind::Pow,
-                        rhs: Box::new(Expr::Number(1.0))
-                    })),
-                    StmtStatus::Some(Stmt::CompOp(CompOp {
-                        lhs: Var::Name("guinea_pig".to_string()),
-                        op: CompOpKind::Concat,
-                        rhs: Box::new(Expr::Number(1.0))
-                    })),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "guinea_pig".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::Number(1.0)]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::CompOp(CompOp {
+                            lhs: Var::Name("guinea_pig".to_string()),
+                            op: CompOpKind::Add,
+                            rhs: Box::new(Expr::Number(1.0))
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::CompOp(CompOp {
+                            lhs: Var::Name("guinea_pig".to_string()),
+                            op: CompOpKind::Sub,
+                            rhs: Box::new(Expr::Number(1.0))
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::CompOp(CompOp {
+                            lhs: Var::Name("guinea_pig".to_string()),
+                            op: CompOpKind::Mul,
+                            rhs: Box::new(Expr::Number(1.0))
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::CompOp(CompOp {
+                            lhs: Var::Name("guinea_pig".to_string()),
+                            op: CompOpKind::Div,
+                            rhs: Box::new(Expr::Number(1.0))
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::CompOp(CompOp {
+                            lhs: Var::Name("guinea_pig".to_string()),
+                            op: CompOpKind::Mod,
+                            rhs: Box::new(Expr::Number(1.0))
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::CompOp(CompOp {
+                            lhs: Var::Name("guinea_pig".to_string()),
+                            op: CompOpKind::Pow,
+                            rhs: Box::new(Expr::Number(1.0))
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::CompOp(CompOp {
+                            lhs: Var::Name("guinea_pig".to_string()),
+                            op: CompOpKind::Concat,
+                            rhs: Box::new(Expr::Number(1.0))
+                        }),
+                        vec![]
+                    ),
                 ]
             }
         );
@@ -2232,29 +2506,32 @@ mod tests {
         "#,
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "cray_cray".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::BinOp(Box::new(BinOp {
-                        lhs: Expr::Wrap(Box::new(Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::BinOp(Box::new(BinOp {
-                                lhs: Expr::Number(1.0),
-                                op: BinOpKind::Add,
-                                rhs: Expr::Wrap(Box::new(Expr::BinOp(Box::new(BinOp {
-                                    lhs: Expr::Number(2.0),
-                                    op: BinOpKind::Mul,
-                                    rhs: Expr::Number(3.0)
-                                })))),
-                            })),
-                            op: BinOpKind::Sub,
-                            rhs: Expr::Wrap(Box::new(Expr::Number(1.0)))
-                        })))),
-                        op: BinOpKind::Div,
-                        rhs: Expr::Number(4.0)
-                    })),]
-                })),]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "cray_cray".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::BinOp(Box::new(BinOp {
+                            lhs: Expr::Wrap(Box::new(Expr::BinOp(Box::new(BinOp {
+                                lhs: Expr::BinOp(Box::new(BinOp {
+                                    lhs: Expr::Number(1.0),
+                                    op: BinOpKind::Add,
+                                    rhs: Expr::Wrap(Box::new(Expr::BinOp(Box::new(BinOp {
+                                        lhs: Expr::Number(2.0),
+                                        op: BinOpKind::Mul,
+                                        rhs: Expr::Number(3.0)
+                                    })))),
+                                })),
+                                op: BinOpKind::Sub,
+                                rhs: Expr::Wrap(Box::new(Expr::Number(1.0)))
+                            })))),
+                            op: BinOpKind::Div,
+                            rhs: Expr::Number(4.0)
+                        })),]
+                    }),
+                    vec![]
+                ),]
             }
         );
     }
@@ -2266,26 +2543,29 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                        name: "a".to_string(),
-                        table: vec![],
-                        is_method: false,
-                        body: FunctionBody {
-                            ret_ty: None,
-                            vararg: false,
-                            generics: vec![],
-                            block: Block {
-                                stmt_ptrs: vec![1, 2, 3]
+                    StmtStatus::Some(
+                        Stmt::FunctionDef(FunctionDef {
+                            name: "a".to_string(),
+                            table: vec![],
+                            is_method: false,
+                            body: FunctionBody {
+                                ret_ty: None,
+                                vararg: false,
+                                generics: vec![],
+                                block: Block {
+                                    stmt_ptrs: vec![1, 2, 3]
+                                },
+                                params: vec![Binding {
+                                    name: "n".to_string(),
+                                    ty: None
+                                }],
                             },
-                            params: vec![Binding {
-                                name: "n".to_string(),
-                                ty: None
-                            }],
-                        },
-                    })),
-                    StmtStatus::Some(Stmt::Continue(Continue {})),
-                    StmtStatus::Some(Stmt::Break(Break {})),
-                    StmtStatus::Some(Stmt::Return(Return { exprs: vec![] })),
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(Stmt::Continue(Continue {}), vec![]),
+                    StmtStatus::Some(Stmt::Break(Break {}), vec![]),
+                    StmtStatus::Some(Stmt::Return(Return { exprs: vec![] }), vec![]),
                 ]
             }
         );
@@ -2300,25 +2580,31 @@ mod tests {
                     stmt_ptrs: vec![0, 1]
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                        name: "a".to_string(),
-                        table: vec![],
-                        is_method: false,
-                        body: FunctionBody {
-                            ret_ty: None,
-                            generics: vec![],
-                            vararg: true,
-                            block: Block { stmt_ptrs: vec![] },
-                            params: vec![],
-                        },
-                    })),
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "e".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::VarArg]
-                    }))
+                    StmtStatus::Some(
+                        Stmt::FunctionDef(FunctionDef {
+                            name: "a".to_string(),
+                            table: vec![],
+                            is_method: false,
+                            body: FunctionBody {
+                                ret_ty: None,
+                                generics: vec![],
+                                vararg: true,
+                                block: Block { stmt_ptrs: vec![] },
+                                params: vec![],
+                            },
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "e".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::VarArg]
+                        }),
+                        vec![]
+                    )
                 ],
             }
         );
@@ -2333,21 +2619,30 @@ mod tests {
                     stmt_ptrs: vec![0, 1, 2],
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "a".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::Number(1.0)]
-                    })),
-                    StmtStatus::Some(Stmt::Assign(Assign {
-                        vars: vec![Var::Name("a".to_string())],
-                        exprs: vec![Expr::Bool(false)]
-                    })),
-                    StmtStatus::Some(Stmt::Assign(Assign {
-                        vars: vec![Var::Name("a".to_string()), Var::Name("b".to_string())],
-                        exprs: vec![Expr::Number(1.0), Expr::Number(2.0)]
-                    })),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "a".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::Number(1.0)]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Assign(Assign {
+                            vars: vec![Var::Name("a".to_string())],
+                            exprs: vec![Expr::Bool(false)]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Assign(Assign {
+                            vars: vec![Var::Name("a".to_string()), Var::Name("b".to_string())],
+                            exprs: vec![Expr::Number(1.0), Expr::Number(2.0)]
+                        }),
+                        vec![]
+                    ),
                 ]
             }
         );
@@ -2360,14 +2655,20 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::Do(Do {
-                        block: Block { stmt_ptrs: vec![1] }
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::Do(Do {
+                            block: Block { stmt_ptrs: vec![1] }
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2380,15 +2681,21 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::While(While {
-                        cond: Expr::Bool(true),
-                        block: Block { stmt_ptrs: vec![1] }
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::While(While {
+                            cond: Expr::Bool(true),
+                            block: Block { stmt_ptrs: vec![1] }
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2401,15 +2708,21 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::Repeat(Repeat {
-                        block: Block { stmt_ptrs: vec![1] },
-                        cond: Expr::Bool(true)
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::Repeat(Repeat {
+                            block: Block { stmt_ptrs: vec![1] },
+                            cond: Expr::Bool(true)
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2429,17 +2742,23 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::If(If {
-                        cond: Expr::Bool(true),
-                        block: Block { stmt_ptrs: vec![1] },
-                        else_if_blocks: vec![],
-                        else_block: None
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::If(If {
+                            cond: Expr::Bool(true),
+                            block: Block { stmt_ptrs: vec![1] },
+                            else_if_blocks: vec![],
+                            else_block: None
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2452,22 +2771,31 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::If(If {
-                        cond: Expr::Bool(true),
-                        block: Block { stmt_ptrs: vec![1] },
-                        else_if_blocks: vec![],
-                        else_block: Some(Block { stmt_ptrs: vec![2] })
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
-                        method: None
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(2.0)]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::If(If {
+                            cond: Expr::Bool(true),
+                            block: Block { stmt_ptrs: vec![1] },
+                            else_if_blocks: vec![],
+                            else_block: Some(Block { stmt_ptrs: vec![2] })
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(2.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2480,22 +2808,33 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::If(If {
-                        cond: Expr::Bool(true),
-                        block: Block { stmt_ptrs: vec![1] },
-                        else_if_blocks: vec![(Expr::Bool(false), Block { stmt_ptrs: vec![2] },)],
-                        else_block: None
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
-                        method: None
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(2.0)]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::If(If {
+                            cond: Expr::Bool(true),
+                            block: Block { stmt_ptrs: vec![1] },
+                            else_if_blocks: vec![
+                                (Expr::Bool(false), Block { stmt_ptrs: vec![2] },)
+                            ],
+                            else_block: None
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(2.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2508,27 +2847,41 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::If(If {
-                        cond: Expr::Bool(true),
-                        block: Block { stmt_ptrs: vec![1] },
-                        else_if_blocks: vec![(Expr::Bool(false), Block { stmt_ptrs: vec![2] },)],
-                        else_block: Some(Block { stmt_ptrs: vec![3] })
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
-                        method: None
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(2.0)]),
-                        method: None
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(3.0)]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::If(If {
+                            cond: Expr::Bool(true),
+                            block: Block { stmt_ptrs: vec![1] },
+                            else_if_blocks: vec![
+                                (Expr::Bool(false), Block { stmt_ptrs: vec![2] },)
+                            ],
+                            else_block: Some(Block { stmt_ptrs: vec![3] })
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(1.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(2.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(3.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2548,21 +2901,27 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::For(For {
-                        start: Expr::Number(1.0),
-                        end: Expr::Number(10.0),
-                        step: None,
-                        block: Block { stmt_ptrs: vec![1] },
-                        var: Binding {
-                            name: "i".to_string(),
-                            ty: None
-                        }
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::For(For {
+                            start: Expr::Number(1.0),
+                            end: Expr::Number(10.0),
+                            step: None,
+                            block: Block { stmt_ptrs: vec![1] },
+                            var: Binding {
+                                name: "i".to_string(),
+                                ty: None
+                            }
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2575,21 +2934,27 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::For(For {
-                        start: Expr::Number(1.0),
-                        end: Expr::Number(10.0),
-                        step: Some(Expr::Number(2.0)),
-                        block: Block { stmt_ptrs: vec![1] },
-                        var: Binding {
-                            name: "i".to_string(),
-                            ty: None
-                        }
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::For(For {
+                            start: Expr::Number(1.0),
+                            end: Expr::Number(10.0),
+                            step: Some(Expr::Number(2.0)),
+                            block: Block { stmt_ptrs: vec![1] },
+                            var: Binding {
+                                name: "i".to_string(),
+                                ty: None
+                            }
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2602,19 +2967,25 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::ForIn(ForIn {
-                        block: Block { stmt_ptrs: vec![1] },
-                        vars: vec![Binding {
-                            name: "i".to_string(),
-                            ty: None
-                        }],
-                        exprs: vec![Expr::Var(Var::Name("a".to_string()))]
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::ForIn(ForIn {
+                            block: Block { stmt_ptrs: vec![1] },
+                            vars: vec![Binding {
+                                name: "i".to_string(),
+                                ty: None
+                            }],
+                            exprs: vec![Expr::Var(Var::Name("a".to_string()))]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Var(Var::Name("i".to_string()))]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2627,28 +2998,34 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::ForIn(ForIn {
-                        block: Block { stmt_ptrs: vec![1] },
-                        vars: vec![
-                            Binding {
-                                name: "i".to_string(),
-                                ty: None
-                            },
-                            Binding {
-                                name: "v".to_string(),
-                                ty: None
-                            }
-                        ],
-                        exprs: vec![Expr::Var(Var::Name("a".to_string()))]
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![
-                            Expr::Var(Var::Name("i".to_string())),
-                            Expr::Var(Var::Name("v".to_string()))
-                        ]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::ForIn(ForIn {
+                            block: Block { stmt_ptrs: vec![1] },
+                            vars: vec![
+                                Binding {
+                                    name: "i".to_string(),
+                                    ty: None
+                                },
+                                Binding {
+                                    name: "v".to_string(),
+                                    ty: None
+                                }
+                            ],
+                            exprs: vec![Expr::Var(Var::Name("a".to_string()))]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![
+                                Expr::Var(Var::Name("i".to_string())),
+                                Expr::Var(Var::Name("v".to_string()))
+                            ]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2661,32 +3038,38 @@ mod tests {
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::ForIn(ForIn {
-                        block: Block { stmt_ptrs: vec![1] },
-                        vars: vec![
-                            Binding {
-                                name: "i".to_string(),
-                                ty: None
-                            },
-                            Binding {
-                                name: "v".to_string(),
-                                ty: None
-                            }
-                        ],
-                        exprs: vec![
-                            Expr::Var(Var::Name("a".to_string())),
-                            Expr::Var(Var::Name("b".to_string())),
-                            Expr::Var(Var::Name("c".to_string()))
-                        ]
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![
-                            Expr::Var(Var::Name("i".to_string())),
-                            Expr::Var(Var::Name("v".to_string()))
-                        ]),
-                        method: None
-                    }))
+                    StmtStatus::Some(
+                        Stmt::ForIn(ForIn {
+                            block: Block { stmt_ptrs: vec![1] },
+                            vars: vec![
+                                Binding {
+                                    name: "i".to_string(),
+                                    ty: None
+                                },
+                                Binding {
+                                    name: "v".to_string(),
+                                    ty: None
+                                }
+                            ],
+                            exprs: vec![
+                                Expr::Var(Var::Name("a".to_string())),
+                                Expr::Var(Var::Name("b".to_string())),
+                                Expr::Var(Var::Name("c".to_string()))
+                            ]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![
+                                Expr::Var(Var::Name("i".to_string())),
+                                Expr::Var(Var::Name("v".to_string()))
+                            ]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2701,40 +3084,49 @@ mod tests {
                     stmt_ptrs: vec![0, 1]
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "f".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::Function(Box::new(FunctionBody {
-                            generics: vec![],
-                            vararg: false,
-                            ret_ty: None,
-                            params: vec![
-                                Binding {
-                                    name: "x".to_string(),
-                                    ty: None
-                                },
-                                Binding {
-                                    name: "y".to_string(),
-                                    ty: None
-                                }
-                            ],
-                            block: Block { stmt_ptrs: vec![2] }
-                        }))]
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("f".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::Number(1.0), Expr::Number(2.0)]),
-                        method: None
-                    })),
-                    StmtStatus::Some(Stmt::Return(Return {
-                        exprs: vec![Expr::BinOp(Box::new(BinOp {
-                            op: BinOpKind::Add,
-                            lhs: Expr::Var(Var::Name("x".to_string())),
-                            rhs: Expr::Var(Var::Name("y".to_string()))
-                        }))]
-                    }))
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "f".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::Function(Box::new(FunctionBody {
+                                generics: vec![],
+                                vararg: false,
+                                ret_ty: None,
+                                params: vec![
+                                    Binding {
+                                        name: "x".to_string(),
+                                        ty: None
+                                    },
+                                    Binding {
+                                        name: "y".to_string(),
+                                        ty: None
+                                    }
+                                ],
+                                block: Block { stmt_ptrs: vec![2] }
+                            }))]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("f".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::Number(1.0), Expr::Number(2.0)]),
+                            method: None
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Return(Return {
+                            exprs: vec![Expr::BinOp(Box::new(BinOp {
+                                op: BinOpKind::Add,
+                                lhs: Expr::Var(Var::Name("x".to_string())),
+                                rhs: Expr::Var(Var::Name("y".to_string()))
+                            }))]
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -2753,13 +3145,16 @@ mod tests {
             "local t = {}",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "t".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::TableConstructor(TableConstructor { fields: vec![] })]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "t".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::TableConstructor(TableConstructor { fields: vec![] })]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -2770,19 +3165,22 @@ mod tests {
             "local t = {1, 2, 3}",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "t".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::TableConstructor(TableConstructor {
-                        fields: vec![
-                            TableField::ImplicitKey(Expr::Number(1.0)),
-                            TableField::ImplicitKey(Expr::Number(2.0)),
-                            TableField::ImplicitKey(Expr::Number(3.0))
-                        ]
-                    })]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "t".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::TableConstructor(TableConstructor {
+                            fields: vec![
+                                TableField::ImplicitKey(Expr::Number(1.0)),
+                                TableField::ImplicitKey(Expr::Number(2.0)),
+                                TableField::ImplicitKey(Expr::Number(3.0))
+                            ]
+                        })]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -2793,28 +3191,31 @@ mod tests {
             "local t = {a = 1, b = 2, c = 3}",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "t".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::TableConstructor(TableConstructor {
-                        fields: vec![
-                            TableField::ExplicitKey {
-                                key: "a".to_string(),
-                                value: Expr::Number(1.0)
-                            },
-                            TableField::ExplicitKey {
-                                key: "b".to_string(),
-                                value: Expr::Number(2.0)
-                            },
-                            TableField::ExplicitKey {
-                                key: "c".to_string(),
-                                value: Expr::Number(3.0)
-                            }
-                        ]
-                    })]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "t".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::TableConstructor(TableConstructor {
+                            fields: vec![
+                                TableField::ExplicitKey {
+                                    key: "a".to_string(),
+                                    value: Expr::Number(1.0)
+                                },
+                                TableField::ExplicitKey {
+                                    key: "b".to_string(),
+                                    value: Expr::Number(2.0)
+                                },
+                                TableField::ExplicitKey {
+                                    key: "c".to_string(),
+                                    value: Expr::Number(3.0)
+                                }
+                            ]
+                        })]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -2825,28 +3226,31 @@ mod tests {
             "local t = {['a'] = 1, ['b'] = 2, ['c'] = 3}",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "t".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::TableConstructor(TableConstructor {
-                        fields: vec![
-                            TableField::ArrayKey {
-                                key: Expr::String("'a'".to_string()),
-                                value: Expr::Number(1.0)
-                            },
-                            TableField::ArrayKey {
-                                key: Expr::String("'b'".to_string()),
-                                value: Expr::Number(2.0)
-                            },
-                            TableField::ArrayKey {
-                                key: Expr::String("'c'".to_string()),
-                                value: Expr::Number(3.0)
-                            }
-                        ]
-                    })]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "t".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::TableConstructor(TableConstructor {
+                            fields: vec![
+                                TableField::ArrayKey {
+                                    key: Expr::String("'a'".to_string()),
+                                    value: Expr::Number(1.0)
+                                },
+                                TableField::ArrayKey {
+                                    key: Expr::String("'b'".to_string()),
+                                    value: Expr::Number(2.0)
+                                },
+                                TableField::ArrayKey {
+                                    key: Expr::String("'c'".to_string()),
+                                    value: Expr::Number(3.0)
+                                }
+                            ]
+                        })]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -2857,25 +3261,28 @@ mod tests {
             "local t = {a = 1, 2, ['c'] = 3}",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "t".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::TableConstructor(TableConstructor {
-                        fields: vec![
-                            TableField::ExplicitKey {
-                                key: "a".to_string(),
-                                value: Expr::Number(1.0)
-                            },
-                            TableField::ImplicitKey(Expr::Number(2.0)),
-                            TableField::ArrayKey {
-                                key: Expr::String("'c'".to_string()),
-                                value: Expr::Number(3.0)
-                            }
-                        ]
-                    })]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "t".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::TableConstructor(TableConstructor {
+                            fields: vec![
+                                TableField::ExplicitKey {
+                                    key: "a".to_string(),
+                                    value: Expr::Number(1.0)
+                                },
+                                TableField::ImplicitKey(Expr::Number(2.0)),
+                                TableField::ArrayKey {
+                                    key: Expr::String("'c'".to_string()),
+                                    value: Expr::Number(3.0)
+                                }
+                            ]
+                        })]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -2886,26 +3293,29 @@ mod tests {
             "local t = f{name = 1, 2, 3}",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "t".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::Call(Box::new(Call {
-                        func: Expr::Var(Var::Name("f".to_string())),
-                        args: CallArgs::Table(TableConstructor {
-                            fields: vec![
-                                TableField::ExplicitKey {
-                                    key: "name".to_string(),
-                                    value: Expr::Number(1.0)
-                                },
-                                TableField::ImplicitKey(Expr::Number(2.0)),
-                                TableField::ImplicitKey(Expr::Number(3.0))
-                            ]
-                        }),
-                        method: None
-                    }))]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "t".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Call(Box::new(Call {
+                            func: Expr::Var(Var::Name("f".to_string())),
+                            args: CallArgs::Table(TableConstructor {
+                                fields: vec![
+                                    TableField::ExplicitKey {
+                                        key: "name".to_string(),
+                                        value: Expr::Number(1.0)
+                                    },
+                                    TableField::ImplicitKey(Expr::Number(2.0)),
+                                    TableField::ImplicitKey(Expr::Number(3.0))
+                                ]
+                            }),
+                            method: None
+                        }))]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -2916,17 +3326,20 @@ mod tests {
             "local t = f'hello'",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "t".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::Call(Box::new(Call {
-                        func: Expr::Var(Var::Name("f".to_string())),
-                        args: CallArgs::String("'hello'".to_string()),
-                        method: None
-                    }))]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "t".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Call(Box::new(Call {
+                            func: Expr::Var(Var::Name("f".to_string())),
+                            args: CallArgs::String("'hello'".to_string()),
+                            method: None
+                        }))]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -2937,25 +3350,28 @@ mod tests {
             "local t = (f())()()",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "t".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::Call(Box::new(Call {
-                        func: Expr::Call(Box::new(Call {
-                            func: Expr::Wrap(Box::new(Expr::Call(Box::new(Call {
-                                func: Expr::Var(Var::Name("f".to_string())),
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "t".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Call(Box::new(Call {
+                            func: Expr::Call(Box::new(Call {
+                                func: Expr::Wrap(Box::new(Expr::Call(Box::new(Call {
+                                    func: Expr::Var(Var::Name("f".to_string())),
+                                    args: CallArgs::Exprs(vec![]),
+                                    method: None
+                                })))),
                                 args: CallArgs::Exprs(vec![]),
                                 method: None
-                            })))),
+                            })),
                             args: CallArgs::Exprs(vec![]),
                             method: None
-                        })),
-                        args: CallArgs::Exprs(vec![]),
-                        method: None
-                    }))]
-                }))]
+                        }))]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -2971,18 +3387,21 @@ mod tests {
             "local x = if true then 1 else 2",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "x".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::IfElseExpr(Box::new(IfElseExpr {
-                        cond: Expr::Bool(true),
-                        if_expr: Expr::Number(1.0),
-                        else_expr: Expr::Number(2.0),
-                        else_if_exprs: vec![]
-                    }))]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::IfElseExpr(Box::new(IfElseExpr {
+                            cond: Expr::Bool(true),
+                            if_expr: Expr::Number(1.0),
+                            else_expr: Expr::Number(2.0),
+                            else_if_exprs: vec![]
+                        }))]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -2993,18 +3412,21 @@ mod tests {
             "local x = if true then 1 elseif false then 2 else 3",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "x".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::IfElseExpr(Box::new(IfElseExpr {
-                        cond: Expr::Bool(true),
-                        if_expr: Expr::Number(1.0),
-                        else_expr: Expr::Number(3.0),
-                        else_if_exprs: vec![(Expr::Bool(false), Expr::Number(2.0))]
-                    }))]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::IfElseExpr(Box::new(IfElseExpr {
+                            cond: Expr::Bool(true),
+                            if_expr: Expr::Number(1.0),
+                            else_expr: Expr::Number(3.0),
+                            else_if_exprs: vec![(Expr::Bool(false), Expr::Number(2.0))]
+                        }))]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3015,21 +3437,24 @@ mod tests {
             "local x = if true then 1 elseif false then 2 elseif false then 2 else 4",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "x".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::IfElseExpr(Box::new(IfElseExpr {
-                        cond: Expr::Bool(true),
-                        if_expr: Expr::Number(1.0),
-                        else_expr: Expr::Number(4.0),
-                        else_if_exprs: vec![
-                            (Expr::Bool(false), Expr::Number(2.0)),
-                            (Expr::Bool(false), Expr::Number(2.0))
-                        ]
-                    }))]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::IfElseExpr(Box::new(IfElseExpr {
+                            cond: Expr::Bool(true),
+                            if_expr: Expr::Number(1.0),
+                            else_expr: Expr::Number(4.0),
+                            else_if_exprs: vec![
+                                (Expr::Bool(false), Expr::Number(2.0)),
+                                (Expr::Bool(false), Expr::Number(2.0))
+                            ]
+                        }))]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3040,16 +3465,19 @@ mod tests {
             "local x = t[1]",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "x".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
-                        expr: Expr::Var(Var::Name("t".to_string())),
-                        index: Expr::Number(1.0)
-                    })))]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                            expr: Expr::Var(Var::Name("t".to_string())),
+                            index: Expr::Number(1.0)
+                        })))]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3060,16 +3488,19 @@ mod tests {
             "local x = (1)[1]",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "x".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
-                        expr: Expr::Wrap(Box::new(Expr::Number(1.0))),
-                        index: Expr::Number(1.0)
-                    })))]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                            expr: Expr::Wrap(Box::new(Expr::Number(1.0))),
+                            index: Expr::Number(1.0)
+                        })))]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3080,16 +3511,19 @@ mod tests {
             "local x = t.x",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "x".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                        expr: Expr::Var(Var::Name("t".to_string())),
-                        field: "x".to_string()
-                    })))]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                            expr: Expr::Var(Var::Name("t".to_string())),
+                            field: "x".to_string()
+                        })))]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3100,16 +3534,19 @@ mod tests {
             "local x = (1).x",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "x".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                        expr: Expr::Wrap(Box::new(Expr::Number(1.0))),
-                        field: "x".to_string()
-                    })))]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                            expr: Expr::Wrap(Box::new(Expr::Number(1.0))),
+                            field: "x".to_string()
+                        })))]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3127,18 +3564,21 @@ mod tests {
             "local x = `hello {name}`",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "x".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::StringInterp(StringInterp {
-                        parts: vec![
-                            StringInterpPart::String("hello ".to_string()),
-                            StringInterpPart::Expr(Expr::Var(Var::Name("name".to_string())))
-                        ]
-                    })]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::StringInterp(StringInterp {
+                            parts: vec![
+                                StringInterpPart::String("hello ".to_string()),
+                                StringInterpPart::Expr(Expr::Var(Var::Name("name".to_string())))
+                            ]
+                        })]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3149,20 +3589,23 @@ mod tests {
             "local x = `hello {name} {age}`",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "x".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::StringInterp(StringInterp {
-                        parts: vec![
-                            StringInterpPart::String("hello ".to_string()),
-                            StringInterpPart::Expr(Expr::Var(Var::Name("name".to_string()))),
-                            StringInterpPart::String(" ".to_string()),
-                            StringInterpPart::Expr(Expr::Var(Var::Name("age".to_string())))
-                        ]
-                    })]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::StringInterp(StringInterp {
+                            parts: vec![
+                                StringInterpPart::String("hello ".to_string()),
+                                StringInterpPart::Expr(Expr::Var(Var::Name("name".to_string()))),
+                                StringInterpPart::String(" ".to_string()),
+                                StringInterpPart::Expr(Expr::Var(Var::Name("age".to_string())))
+                            ]
+                        })]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3173,22 +3616,25 @@ mod tests {
             "local x = `hello {1 + 2}`",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "x".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::StringInterp(StringInterp {
-                        parts: vec![
-                            StringInterpPart::String("hello ".to_string()),
-                            StringInterpPart::Expr(Expr::BinOp(Box::new(BinOp {
-                                op: BinOpKind::Add,
-                                lhs: Expr::Number(1.0),
-                                rhs: Expr::Number(2.0)
-                            })))
-                        ]
-                    })]
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::StringInterp(StringInterp {
+                            parts: vec![
+                                StringInterpPart::String("hello ".to_string()),
+                                StringInterpPart::Expr(Expr::BinOp(Box::new(BinOp {
+                                    op: BinOpKind::Add,
+                                    lhs: Expr::Number(1.0),
+                                    rhs: Expr::Number(2.0)
+                                })))
+                            ]
+                        })]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3205,53 +3651,61 @@ mod tests {
                     stmt_ptrs: vec![0, 1]
                 },
                 stmts: vec![
-                    StmtStatus::Some(Stmt::Local(Local {
-                        bindings: vec![Binding {
-                            name: "combos".to_string(),
-                            ty: None
-                        }],
-                        init: vec![Expr::TableConstructor(TableConstructor {
-                            fields: vec![
-                                TableField::ImplicitKey(Expr::Number(2.0)),
-                                TableField::ImplicitKey(Expr::Number(7.0)),
-                                TableField::ImplicitKey(Expr::Number(1.0)),
-                                TableField::ImplicitKey(Expr::Number(8.0)),
-                                TableField::ImplicitKey(Expr::Number(5.0))
-                            ]
-                        })]
-                    })),
-                    StmtStatus::Some(Stmt::Call(Call {
-                        func: Expr::Var(Var::Name("print".to_string())),
-                        args: CallArgs::Exprs(vec![Expr::StringInterp(StringInterp {
-                            parts: vec![
-                                StringInterpPart::String("The lock combination is ".to_string()),
-                                StringInterpPart::Expr(Expr::Call(Box::new(Call {
-                                    func: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                                        expr: Expr::Var(Var::Name("table".to_string())),
-                                        field: "concat".to_string()
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "combos".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::TableConstructor(TableConstructor {
+                                fields: vec![
+                                    TableField::ImplicitKey(Expr::Number(2.0)),
+                                    TableField::ImplicitKey(Expr::Number(7.0)),
+                                    TableField::ImplicitKey(Expr::Number(1.0)),
+                                    TableField::ImplicitKey(Expr::Number(8.0)),
+                                    TableField::ImplicitKey(Expr::Number(5.0))
+                                ]
+                            })]
+                        }),
+                        vec![]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Call(Call {
+                            func: Expr::Var(Var::Name("print".to_string())),
+                            args: CallArgs::Exprs(vec![Expr::StringInterp(StringInterp {
+                                parts: vec![
+                                    StringInterpPart::String(
+                                        "The lock combination is ".to_string()
+                                    ),
+                                    StringInterpPart::Expr(Expr::Call(Box::new(Call {
+                                        func: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                            expr: Expr::Var(Var::Name("table".to_string())),
+                                            field: "concat".to_string()
+                                        }))),
+                                        args: CallArgs::Exprs(vec![Expr::Var(Var::Name(
+                                            "combos".to_string()
+                                        ))]),
+                                        method: None
                                     }))),
-                                    args: CallArgs::Exprs(vec![Expr::Var(Var::Name(
-                                        "combos".to_string()
-                                    ))]),
-                                    method: None
-                                }))),
-                                StringInterpPart::String(". Again, ".to_string()),
-                                StringInterpPart::Expr(Expr::Call(Box::new(Call {
-                                    func: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                                        expr: Expr::Var(Var::Name("table".to_string())),
-                                        field: "concat".to_string()
+                                    StringInterpPart::String(". Again, ".to_string()),
+                                    StringInterpPart::Expr(Expr::Call(Box::new(Call {
+                                        func: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                            expr: Expr::Var(Var::Name("table".to_string())),
+                                            field: "concat".to_string()
+                                        }))),
+                                        args: CallArgs::Exprs(vec![
+                                            Expr::Var(Var::Name("combos".to_string())),
+                                            Expr::String("\", \"".to_string())
+                                        ]),
+                                        method: None
                                     }))),
-                                    args: CallArgs::Exprs(vec![
-                                        Expr::Var(Var::Name("combos".to_string())),
-                                        Expr::String("\", \"".to_string())
-                                    ]),
-                                    method: None
-                                }))),
-                                StringInterpPart::String(".".to_string())
-                            ]
-                        })]),
-                        method: None
-                    }))
+                                    StringInterpPart::String(".".to_string())
+                                ]
+                            })]),
+                            method: None
+                        }),
+                        vec![]
+                    )
                 ]
             }
         );
@@ -3263,19 +3717,22 @@ mod tests {
             "local u = workspace.TempStorage.HelperGUI",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "u".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                        expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                            expr: Expr::Var(Var::Name("workspace".to_string())),
-                            field: "TempStorage".to_string()
-                        }))),
-                        field: "HelperGUI".to_string()
-                    })))],
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "u".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                            expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                expr: Expr::Var(Var::Name("workspace".to_string())),
+                                field: "TempStorage".to_string()
+                            }))),
+                            field: "HelperGUI".to_string()
+                        })))],
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3286,17 +3743,20 @@ mod tests {
             "workspace.TempStorage.HelperGUI:Destroy()",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Call(Call {
-                    func: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                        expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                            expr: Expr::Var(Var::Name("workspace".to_string())),
-                            field: "TempStorage".to_string()
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Call(Call {
+                        func: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                            expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                expr: Expr::Var(Var::Name("workspace".to_string())),
+                                field: "TempStorage".to_string()
+                            }))),
+                            field: "HelperGUI".to_string()
                         }))),
-                        field: "HelperGUI".to_string()
-                    }))),
-                    args: CallArgs::Exprs(vec![]),
-                    method: Some("Destroy".to_string())
-                }))]
+                        args: CallArgs::Exprs(vec![]),
+                        method: Some("Destroy".to_string())
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3307,25 +3767,28 @@ mod tests {
             "local u = workspace.TempStorage.HelperGUI.aaa.bbb",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "u".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                        expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "u".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
                             expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
                                 expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                                    expr: Expr::Var(Var::Name("workspace".to_string())),
-                                    field: "TempStorage".to_string()
+                                    expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                                        expr: Expr::Var(Var::Name("workspace".to_string())),
+                                        field: "TempStorage".to_string()
+                                    }))),
+                                    field: "HelperGUI".to_string()
                                 }))),
-                                field: "HelperGUI".to_string()
+                                field: "aaa".to_string()
                             }))),
-                            field: "aaa".to_string()
-                        }))),
-                        field: "bbb".to_string()
-                    })))],
-                }))]
+                            field: "bbb".to_string()
+                        })))],
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3336,25 +3799,28 @@ mod tests {
             "local x = t[1][2][3][4]",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "x".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
-                        expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
                             expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
                                 expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
-                                    expr: Expr::Var(Var::Name("t".to_string())),
-                                    index: Expr::Number(1.0)
+                                    expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                                        expr: Expr::Var(Var::Name("t".to_string())),
+                                        index: Expr::Number(1.0)
+                                    }))),
+                                    index: Expr::Number(2.0)
                                 }))),
-                                index: Expr::Number(2.0)
+                                index: Expr::Number(3.0)
                             }))),
-                            index: Expr::Number(3.0)
-                        }))),
-                        index: Expr::Number(4.0)
-                    })))]
-                }))]
+                            index: Expr::Number(4.0)
+                        })))]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3365,31 +3831,36 @@ mod tests {
             "local x = t.a[2][1].b.c[3]",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::Local(Local {
-                    bindings: vec![Binding {
-                        name: "x".to_string(),
-                        ty: None
-                    }],
-                    init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
-                        expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
                             expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                                expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                                expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
                                     expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
-                                        expr: Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                                            expr: Expr::Var(Var::Name("t".to_string())),
-                                            field: "a".to_string()
+                                        expr: Expr::Var(Var::TableAccess(Box::new(TableAccess {
+                                            expr: Expr::Var(Var::FieldAccess(Box::new(
+                                                FieldAccess {
+                                                    expr: Expr::Var(Var::Name("t".to_string())),
+                                                    field: "a".to_string()
+                                                }
+                                            ))),
+                                            index: Expr::Number(2.0)
                                         }))),
-                                        index: Expr::Number(2.0)
+                                        index: Expr::Number(1.0)
                                     }))),
-                                    index: Expr::Number(1.0)
+                                    field: "b".to_string()
                                 }))),
-                                field: "b".to_string()
+                                field: "c".to_string()
                             }))),
-                            field: "c".to_string()
-                        }))),
-                        index: Expr::Number(3.0)
-                    })))],
-                }))]
+                            index: Expr::Number(3.0)
+                        })))],
+                    }),
+                    vec![]
+                )]
             }
         );
     }
@@ -3400,18 +3871,187 @@ mod tests {
             "function f(): number end",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
-                stmts: vec![StmtStatus::Some(Stmt::FunctionDef(FunctionDef {
-                    name: "f".to_string(),
-                    table: vec![],
-                    is_method: false,
-                    body: FunctionBody {
-                        params: vec![],
-                        vararg: false,
-                        generics: vec![],
-                        ret_ty: None,
-                        block: Block { stmt_ptrs: vec![] }
-                    },
-                }))]
+                stmts: vec![StmtStatus::Some(
+                    Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        table: vec![],
+                        is_method: false,
+                        body: FunctionBody {
+                            params: vec![],
+                            vararg: false,
+                            generics: vec![],
+                            ret_ty: None,
+                            block: Block { stmt_ptrs: vec![] }
+                        },
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn comment_1() {
+        assert_parse!(
+            "Configurations.MaxApplesAtATime = 5 -- the maximum amount of apples that can be on the ground at one time",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(Stmt::Assign(
+                            Assign { vars: vec![Var::FieldAccess(Box::new(FieldAccess { expr: Expr::Var(Var::Name("Configurations".to_string())), field: "MaxApplesAtATime".to_string() }))], exprs: vec![Expr::Number(5.0)] }
+                    ), vec![
+                        Comment::Trailing("-- the maximum amount of apples that can be on the ground at one time".to_string())
+                    ])
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn comment_2() {
+        assert_parse!(
+            "-- Hola amigos\nlocal x = 3",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Number(3.0)]
+                    }),
+                    vec![Comment::Leading("-- Hola amigos".to_string())]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn comment_3() {
+        assert_parse!(
+            "local x = 3 -- Hola amigos",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Number(3.0)]
+                    }),
+                    vec![Comment::Trailing("-- Hola amigos".to_string())]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn comment_4() {
+        assert_parse!(
+            "local x = 3 -- Hola amigos\nlocal y = 4",
+            Chunk {
+                block: Block {
+                    stmt_ptrs: vec![0, 1]
+                },
+                stmts: vec![
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "x".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::Number(3.0)]
+                        }),
+                        vec![Comment::Trailing("-- Hola amigos".to_string())]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Local(Local {
+                            bindings: vec![Binding {
+                                name: "y".to_string(),
+                                ty: None
+                            }],
+                            init: vec![Expr::Number(4.0)]
+                        }),
+                        vec![]
+                    )
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn comment_5() {
+        assert_parse!(
+            "local x = 3 -- Hola amigos\n-- Adios amigos",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::Number(3.0)]
+                    }),
+                    vec![
+                        Comment::Trailing("-- Hola amigos".to_string()),
+                        Comment::Trailing("-- Adios amigos".to_string())
+                    ]
+                ),]
+            }
+        );
+    }
+
+    #[test]
+    fn nicely_commented_function() {
+        assert_parse!(
+            r#"
+            --[[
+                This function does something cool.
+                It's really cool.
+            ]]
+            -- Totally cool, it works really well.
+            function f()
+                --[[
+                    This is a comment inside the function.
+                    It's really cool.
+                ]]
+                -- Totally cool, it works really well.
+                return 3
+            end
+            "#,
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![
+                    StmtStatus::Some(
+                        Stmt::FunctionDef(FunctionDef {
+                            name: "f".to_string(),
+                            table: vec![],
+                            is_method: false,
+                            body: FunctionBody {
+                                params: vec![],
+                                vararg: false,
+                                generics: vec![],
+                                ret_ty: None,
+                                block: Block { stmt_ptrs: vec![1] }
+                            },
+                        }),
+                        vec![
+                            Comment::Leading("--[[\n                This function does something cool.\n                It's really cool.\n            ]]".to_string()),
+                            Comment::Leading("-- Totally cool, it works really well.".to_string()),
+                            Comment::Trailing("--[[\n                    This is a comment inside the function.\n                    It's really cool.\n                ]]".to_string()),
+                            Comment::Trailing("-- Totally cool, it works really well.".to_string())
+                        ]
+                    ),
+                    StmtStatus::Some(
+                        Stmt::Return(Return {
+                            exprs: vec![Expr::Number(3.0)]
+                        }),
+                        vec![]
+                    )
+                ]
             }
         );
     }
