@@ -825,7 +825,7 @@ impl<'s, 'ts> Parser<'s> {
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
-                "return" => {}
+                "return" | "," => {}
                 "comment" => self.parse_comment_tr(child),
                 _ => exprs.push(self.parse_expr(child, unp)?),
             }
@@ -4076,6 +4076,23 @@ mod tests {
                         vec![]
                     )
                 ]
+            }
+        );
+    }
+
+    #[test]
+    fn regression_6() {
+        assert_parse!(
+            "return 1, 2",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Return(Return { exprs: vec![
+                        Expr::Number(1.0),
+                        Expr::Number(2.0),
+                    ] }),
+                    vec![]
+                )]
             }
         );
     }
