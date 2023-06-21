@@ -16,6 +16,7 @@ pub struct Parser<'s> {
     text: &'s str,
     chunk: Chunk,
     acc_trailing_comments: Vec<Comment>,
+    pretty_errors: bool,
 }
 
 struct StmtToBeParsed<'ts> {
@@ -53,7 +54,12 @@ impl<'s, 'ts> Parser<'s> {
             text,
             chunk: Chunk::default(),
             acc_trailing_comments: Vec::new(),
+            pretty_errors: false,
         }
+    }
+
+    pub fn set_pretty_errors(&mut self, pretty_errors: bool) {
+        self.pretty_errors = pretty_errors;
     }
 
     pub fn parse(mut self) -> Result<Chunk> {
@@ -119,32 +125,34 @@ impl<'s, 'ts> Parser<'s> {
     }
 
     fn error(&self, node: tree_sitter::Node<'ts>) -> ParseError {
+        let mut clipped = String::new();
         let start = node.start_position();
         let end = node.end_position();
 
-        let text = self.text;
+        if self.pretty_errors {
+            let clip_start = std::cmp::max(0, (start.row as i32) - 3) as usize;
+            let clip_end = end.row + 3;
 
-        let clip_start = std::cmp::max(0, (start.row as i32) - 3) as usize;
-        let clip_end = end.row + 3;
-
-        let mut clipped = String::new();
-
-        for (i, line) in text.lines().skip(clip_start).enumerate() {
-            let i = i + clip_start;
-            clipped.push_str(line);
-            clipped.push('\n');
-            // if i is in range of start.row and end.row, add a marker
-            if i >= start.row && i <= end.row {
-                let start_col = if i == start.row { start.column } else { 0 };
-                let end_col = if i == end.row { end.column } else { line.len() };
-                let marker = " ".repeat(start_col) + &"^".repeat(end_col - start_col);
-                clipped.push_str(&marker);
+            for (i, line) in self.text.lines().skip(clip_start).enumerate() {
+                let i = i + clip_start;
+                clipped.push_str(line);
                 clipped.push('\n');
-            }
+                // if i is in range of start.row and end.row, add a marker
+                if i >= start.row && i <= end.row {
+                    // TODO: this logic does not work for multi-line errors
+                    let start_col = if i == start.row { start.column } else { 0 };
+                    let end_col = if i == end.row { end.column } else { line.len() };
+                    let marker = " ".repeat(start_col) + &"^".repeat(end_col - start_col);
+                    clipped.push_str(&marker);
+                    clipped.push('\n');
+                }
 
-            if i == clip_end {
-                break;
+                if i == clip_end {
+                    break;
+                }
             }
+        } else {
+            clipped = self.extract_text(node).to_string();
         }
 
         ParseError::SyntaxError {
