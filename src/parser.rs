@@ -567,7 +567,6 @@ impl<'s, 'ts> Parser<'s> {
         let mut else_if_blocks = Vec::new();
         let mut else_block = None;
 
-        #[derive(Debug)]
         enum State {
             Condition,
             Else,
@@ -968,6 +967,7 @@ impl<'s, 'ts> Parser<'s> {
     ) -> Result<Var> {
         let cursor = &mut node.walk();
 
+        #[derive(Debug)]
         enum State<'ts> {
             Init,
             TableExpr(tree_sitter::Node<'ts>),
@@ -1002,24 +1002,28 @@ impl<'s, 'ts> Parser<'s> {
                         expr: Expr::Var(var.take().unwrap()),
                         index: self.parse_expr(child, unp)?,
                     })));
+                    state = State::Init;
                 }
                 (_, State::FieldExprWasVar) => {
                     var = Some(Var::FieldAccess(Box::new(FieldAccess {
                         expr: Expr::Var(var.take().unwrap()),
                         field: self.extract_text(child).to_string(),
                     })));
+                    state = State::Init;
                 }
                 (_, State::TableExpr(expr_node)) => {
                     var = Some(Var::TableAccess(Box::new(TableAccess {
                         expr: self.parse_expr(*expr_node, unp)?,
                         index: self.parse_expr(child, unp)?,
                     })));
+                    state = State::Init;
                 }
                 (_, State::FieldExpr(expr_node)) => {
                     var = Some(Var::FieldAccess(Box::new(FieldAccess {
                         expr: self.parse_expr(*expr_node, unp)?,
                         field: self.extract_text(child).to_string(),
                     })));
+                    state = State::Init;
                 }
                 (_, State::Init) => state = State::TableExpr(child),
             }
