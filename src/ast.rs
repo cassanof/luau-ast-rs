@@ -188,7 +188,7 @@ pub struct FunctionBody {
     pub params: Vec<Binding>,
     pub generics: Vec<GenericParam>,
     pub vararg: bool,
-    pub ret_ty: Option<Type>,
+    pub ret_ty: Option<TypeOrPack>,
     pub block: Block,
 }
 
@@ -280,18 +280,25 @@ pub struct Continue;
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamedType {
-    table: Option<String>,
-    name: String,
-    params: Vec<TypeParam>,
+    pub table: Option<String>,
+    pub name: String,
+    pub params: Vec<TypeOrPack>,
 }
 
 /// Represents a function type
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionType {
-    generics: Vec<GenericParam>,
-    params: Vec<Type>,
-    ret_ty: Box<Type>,
+    pub generics: Vec<GenericParam>,
+    pub params: Vec<Type>,
+    pub ret_ty: Box<TypeOrPack>,
+}
+
+/// Represents a table type
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableType {
+    pub props: Vec<TableProp>,
 }
 
 /// Represents a do statement.
@@ -387,6 +394,14 @@ pub struct StringInterp {
     pub parts: Vec<StringInterpPart>,
 }
 
+/// Represents a type assertion
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeAssertion {
+    pub expr: Expr,
+    pub ty: Type,
+}
+
 /// Represents a statement node in the AST.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -429,7 +444,7 @@ pub enum Expr {
     Function(Box<FunctionBody>),
     IfElseExpr(Box<IfElseExpr>),
     StringInterp(StringInterp),
-    // TypeAssertion(TypeAssertion),
+    TypeAssertion(Box<TypeAssertion>),
     BinOp(Box<BinOp>),
     UnOp(Box<UnOp>),
 }
@@ -487,8 +502,6 @@ pub enum Type {
     // \ compounds, should be their own node but we don't care /
     /// ...T
     Variadic(Box<Type>),
-    /// `( T, U )` or `( T, U, ...V )`
-    Pack(Vec<Type>),
     // \ simple types /
     /// `( T )`
     Wrap(Box<Type>),
@@ -497,15 +510,15 @@ pub enum Type {
     /// `T` or `T<PARAM1, PARAM2>` or `tbl.T`
     Named(NamedType),
     /// `{ [T] : U }` or `{ x : T }`
-    Table(Vec<TableProp>),
+    Table(TableType),
     /// `( T ) -> U` or `<T, U...>( T ) -> U`
     Function(FunctionType),
     /// `T?`
     Optional(Box<Type>),
     /// `T | U`
-    Union(Box<Type>),
+    Union(Box<Type>, Box<Type>),
     /// `T & U`
-    Intersection(Box<Type>),
+    Intersection(Box<Type>, Box<Type>),
     // \ literals (singleton) /
     /// `nil`
     Nil,
@@ -513,6 +526,25 @@ pub enum Type {
     String(String),
     /// `false` or `true`
     Bool(bool),
+}
+
+/// Represents a type that is either a Type or TypePack
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeOrPack {
+    Type(Type),
+    TypePack(TypePack),
+}
+
+/// Represents a type pack
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypePack {
+    // TODO
+    /*
+    /// `( T, U )` or `( T, U, ...V )`
+    Pack(Vec<Type>),
+    */
 }
 
 /// Represents a table property or indexer.
@@ -523,13 +555,6 @@ pub enum TableProp {
     Indexer { key: Type, value: Type },
     /// `x : T`
     Prop { key: String, value: Type },
-}
-
-/// Represents a type parameter node in the AST.
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
-pub enum TypeParam {
-    // TODO
 }
 
 /// Represents a generic type parameter.

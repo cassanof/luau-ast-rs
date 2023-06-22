@@ -44,6 +44,7 @@ macro_rules! trait_visitor {
         fn visit_table_constructor(&mut self, _table_constructor: $($ref)+ TableConstructor) {}
         fn visit_table_field(&mut self, _table_field: $($ref)+ TableField) {}
         fn visit_string_interp(&mut self, _string_interp: $($ref)+ StringInterp) {}
+        fn visit_type_assertion(&mut self, _type_assertion: $($ref)+ TypeAssertion) {}
     };
 }
 
@@ -123,6 +124,7 @@ macro_rules! impl_visitor_driver {
                 Expr::BinOp(b) => self.drive_bin_op(b, unv),
                 Expr::UnOp(u) => self.drive_un_op(u, unv),
                 Expr::StringInterp(s) => self.drive_string_interp(s, unv),
+                Expr::TypeAssertion(t) => self.drive_type_assertion(t, unv),
             }
         }
 
@@ -352,6 +354,10 @@ macro_rules! impl_visitor_driver {
             }
         }
 
+        fn drive_type_assertion(&mut self, type_assertion: $($ref)+ TypeAssertion, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_type_assertion(type_assertion);
+            self.drive_expr($($ref)+ type_assertion.expr, unv);
+        }
     };
 }
 

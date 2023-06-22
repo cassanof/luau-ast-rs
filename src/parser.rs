@@ -33,6 +33,12 @@ struct NodeSiblingIter<'a> {
     node: Option<tree_sitter::Node<'a>>,
 }
 
+impl<'a> NodeSiblingIter<'a> {
+    fn new(node: tree_sitter::Node<'a>) -> Self {
+        Self { node: Some(node) }
+    }
+}
+
 impl<'a> Iterator for NodeSiblingIter<'a> {
     type Item = tree_sitter::Node<'a>;
 
@@ -270,7 +276,7 @@ impl<'s, 'ts> Parser<'s> {
         for child in node.children(cursor) {
             let kind = child.kind();
             match kind {
-                "binding" => bindings.push(self.parse_binding(child)?),
+                "binding" => bindings.push(self.parse_binding(child, unp)?),
                 "local" | "," => {}
 
                 // start of init exprs
@@ -307,7 +313,7 @@ impl<'s, 'ts> Parser<'s> {
 
         let mut state = State::Generics;
 
-        for node in (NodeSiblingIter { node: Some(node) }) {
+        for node in NodeSiblingIter::new(node) {
             let kind = node.kind();
             match (kind, &state) {
                 ("<", State::Generics) => {}
@@ -326,7 +332,7 @@ impl<'s, 'ts> Parser<'s> {
                     // yuck...
                     Some(n) if n.kind() == "vararg" => vararg = true,
                     Some(n) if n.kind() == "comment" => self.parse_comment_tr(n),
-                    _ => params.push(self.parse_binding(node)?),
+                    _ => params.push(self.parse_binding(node, unp)?),
                 },
                 (")", State::Params) => state = State::Block,
                 (":", State::Block) => state = State::RetTy,
@@ -647,7 +653,7 @@ impl<'s, 'ts> Parser<'s> {
             match (kind, &state) {
                 ("for" | "do" | "end", _) => {}
                 ("binding", State::Var) => {
-                    var = Some(self.parse_binding(child)?);
+                    var = Some(self.parse_binding(child, unp)?);
                     state = State::Start;
                 }
                 ("=", State::Start) => {}
@@ -707,7 +713,7 @@ impl<'s, 'ts> Parser<'s> {
                 ("in", State::Var) => state = State::Expr,
                 ("do", State::Expr) => state = State::Block,
                 ("binding", State::Var) => {
-                    vars.push(self.parse_binding(child)?);
+                    vars.push(self.parse_binding(child, unp)?);
                 }
                 (",", State::Expr | State::Var) => {}
                 ("comment", _) => self.parse_comment_tr(child),
@@ -879,9 +885,14 @@ impl<'s, 'ts> Parser<'s> {
         Ok(Assign { vars, exprs })
     }
 
-    fn parse_binding(&mut self, node: tree_sitter::Node<'ts>) -> Result<Binding> {
+    fn parse_binding(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Binding> {
         let cursor = &mut node.walk();
         let mut name = String::new();
+        let mut ty = None;
         let mut parsing_type = false;
         for child in node.children(cursor) {
             let kind = child.kind();
@@ -892,12 +903,185 @@ impl<'s, 'ts> Parser<'s> {
                 }
                 "comment" => self.parse_comment_tr(child),
                 _ if parsing_type => {
-                    eprintln!("TODO: parse_binding (type delegation): {}", kind);
+                    ty = Some(self.parse_type(child, unp)?);
+                    parsing_type = false;
                 }
                 _ => return Err(self.error(child)),
             }
         }
-        Ok(Binding { name, ty: None })
+        Ok(Binding { name, ty })
+    }
+
+    fn parse_type(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Type> {
+        let kind = node.kind();
+        match kind {
+            "singleton" => {
+                let singleton = node.child(0).ok_or_else(|| self.error(node))?;
+                let kind = singleton.kind();
+                match kind {
+                    "nil" => Ok(Type::Nil),
+                    "boolean" => Ok(Type::Bool(self.parse_bool(singleton)?)),
+                    "string" => Ok(Type::String(self.extract_text(singleton).to_string())),
+                    _ => Err(self.error(singleton)),
+                }
+            }
+            "dyntype" => Ok(Type::TypeOf(
+                self.parse_expr(node.child(2).ok_or_else(|| self.error(node))?, unp)?,
+            )),
+            "wraptype" => Ok(Type::Wrap(Box::new(
+                self.parse_type(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
+            ))),
+            "untype" => Ok(Type::Optional(Box::new(
+                self.parse_type(node.child(0).ok_or_else(|| self.error(node))?, unp)?,
+            ))),
+            "namedtype" => Ok(Type::Named(self.parse_type_named(node, unp)?)),
+            "bintype" => self.parse_bintype(node, unp),
+            _ => todo!("parse_type {}: {}", kind, self.extract_text(node)),
+        }
+    }
+
+    fn parse_bintype(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Type> {
+        let cursor = &mut node.walk();
+
+        let mut lhs = None;
+        let mut rhs = None;
+
+        enum State {
+            Left,
+            Op,
+            Right,
+        }
+
+        enum TypeKind {
+            Union,
+            Intersection,
+        }
+
+        let mut ty_kind = None;
+        let mut state = State::Left;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &state) {
+                ("comment", _) => self.parse_comment_tr(child),
+                (_, State::Left) => {
+                    lhs = Some(self.parse_type(child, unp)?);
+                    state = State::Op;
+                }
+                ("|", State::Op) => {
+                    ty_kind = Some(TypeKind::Union);
+                    state = State::Right;
+                }
+                ("&", State::Op) => {
+                    ty_kind = Some(TypeKind::Intersection);
+                    state = State::Right;
+                }
+                (_, State::Right) => {
+                    rhs = Some(self.parse_type(child, unp)?);
+                    state = State::Op;
+                }
+                _ => return Err(self.error(child)),
+            }
+        }
+
+        let lhs_box = Box::new(lhs.unwrap());
+        let rhs_box = Box::new(rhs.unwrap());
+
+        match ty_kind.unwrap() {
+            TypeKind::Union => Ok(Type::Union(lhs_box, rhs_box)),
+            TypeKind::Intersection => Ok(Type::Intersection(lhs_box, rhs_box)),
+        }
+    }
+
+    fn parse_type_named(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<NamedType> {
+        let cursor = &mut node.walk();
+        let mut table = None;
+        let mut name = String::new();
+        let mut params = Vec::new();
+
+        enum State {
+            Name,
+            Field,
+            Params,
+        }
+
+        let mut state = State::Name;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &state) {
+                ("name", State::Name) => name.push_str(self.extract_text(child)),
+                (".", State::Name) => {
+                    table = Some(name);
+                    name = String::new();
+                    state = State::Field;
+                }
+                ("name", State::Field) => {
+                    name.push_str(self.extract_text(child));
+                    state = State::Params;
+                }
+                ("<", State::Params) => {
+                    params = self.parse_type_params(child, unp)?;
+                    break;
+                }
+                ("comment", _) => self.parse_comment_tr(child),
+                _ => return Err(self.error(child)),
+            }
+        }
+        Ok(NamedType {
+            table,
+            name,
+            params,
+        })
+    }
+
+    // NOTE: the node has to be on a '<' token or first param
+    fn parse_type_params(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Vec<TypeOrPack>> {
+        let mut params = Vec::new();
+        for child in NodeSiblingIter::new(node) {
+            let kind = child.kind();
+            match kind {
+                "<" | ">" | "," => {}
+                "typeparam" => {
+                    let ty = self.parse_type_or_pack(child.child(0).unwrap(), unp)?;
+                    params.push(ty);
+                }
+                "comment" => self.parse_comment_tr(child),
+                _ => return Err(self.error(child)),
+            }
+        }
+        Ok(params)
+    }
+
+    fn parse_type_or_pack(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<TypeOrPack> {
+        let kind = node.kind();
+        match kind {
+            // ugly, i know
+            "namedtype" | "wraptype" | "dyntype" | "fntype" | "tbtype" | "bintype" | "untype" => {
+                Ok(TypeOrPack::Type(self.parse_type(node, unp)?))
+            }
+            _ => todo!("parse_type_or_pack {}: {}", kind, self.extract_text(node)),
+        }
     }
 
     fn parse_expr(
@@ -919,22 +1103,18 @@ impl<'s, 'ts> Parser<'s> {
                 "exp_wrap" => Ok(Expr::Wrap(Box::new(
                     self.parse_expr(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
                 ))),
-                // delegate to parse_var
                 "var" => Ok(Expr::Var(self.parse_var(node, unp)?)),
-                // delegate to parse_binop
                 "binexp" => Ok(Expr::BinOp(Box::new(self.parse_binop(node, unp)?))),
-                // delegate to parse_unop
                 "unexp" => Ok(Expr::UnOp(Box::new(self.parse_unop(node, unp)?))),
-                // delegate to parse_call
                 "call_stmt" => Ok(Expr::Call(Box::new(self.parse_call(node, unp)?))),
-                // delegate to parse_tableconstructor
                 "table" => Ok(Expr::TableConstructor(
                     self.parse_tableconstructor(node, unp)?,
                 )),
-                // delegate to parse_ifexpr
                 "ifexp" => Ok(Expr::IfElseExpr(Box::new(self.parse_ifelseexp(node, unp)?))),
-                // delegate to parse_string_interp
                 "string_interp" => Ok(Expr::StringInterp(self.parse_string_interp(node, unp)?)),
+                "cast" => Ok(Expr::TypeAssertion(Box::new(
+                    self.parse_type_assertion(node, unp)?,
+                ))),
                 _ => Err(self.error(node)),
             }
         })
@@ -1281,6 +1461,37 @@ impl<'s, 'ts> Parser<'s> {
             }
         }
         Ok(StringInterp { parts })
+    }
+
+    fn parse_type_assertion(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<TypeAssertion> {
+        let cursor = &mut node.walk();
+        enum State<'ts> {
+            Expr,
+            TypeNext(tree_sitter::Node<'ts>),
+        }
+
+        let mut state = State::Expr;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &state) {
+                ("comment", _) => self.parse_comment_tr(child),
+                (_, State::Expr) => {
+                    state = State::TypeNext(child);
+                }
+                ("::", State::TypeNext(_)) => {}
+                (_, State::TypeNext(expr_node)) => {
+                    let expr = self.parse_expr(*expr_node, unp)?;
+                    let ty = self.parse_type(child, unp)?;
+                    return Ok(TypeAssertion { expr, ty });
+                }
+            }
+        }
+        Err(self.error(node))
     }
 }
 
@@ -4288,6 +4499,413 @@ end
             Chunk {
                 block: Block::default(),
                 stmts: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_singletons() {
+        assert_parse!(
+            "local x: nil = nil\nlocal y: true = true\nlocal z: false = false\nlocal str: \"string\" = \"string\"",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0,1,2,3] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Nil)
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                ),
+                StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "y".to_string(),
+                            ty: Some(Type::Bool(true))
+                        }],
+                        init: vec![Expr::Bool(true)]
+                    }),
+                    vec![]
+                ),
+                StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "z".to_string(),
+                            ty: Some(Type::Bool(false))
+                        }],
+                        init: vec![Expr::Bool(false)]
+                    }),
+                    vec![]
+                ),
+                StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "str".to_string(),
+                            ty: Some(Type::String("\"string\"".to_string()))
+                        }],
+                        init: vec![Expr::String("\"string\"".to_string())]
+                    }),
+                    vec![]
+                )
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_named_simple() {
+        assert_parse!(
+            "local x: number = 1",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Named(NamedType {
+                                table: None,
+                                name: "number".to_string(),
+                                params: vec![]
+                            }))
+                        }],
+                        init: vec![Expr::Number(1.0)]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_named_field() {
+        assert_parse!(
+            "local x: a.b = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Named(NamedType {
+                                table: Some("a".to_string()),
+                                name: "b".to_string(),
+                                params: vec![]
+                            }))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_named_params() {
+        assert_parse!(
+            "local x: a.b<c, d> = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Named(NamedType {
+                                table: Some("a".to_string()),
+                                name: "b".to_string(),
+                                params: vec![
+                                    TypeOrPack::Type(Type::Named(NamedType {
+                                        table: None,
+                                        name: "c".to_string(),
+                                        params: vec![]
+                                    })),
+                                    TypeOrPack::Type(Type::Named(NamedType {
+                                        table: None,
+                                        name: "d".to_string(),
+                                        params: vec![]
+                                    }))
+                                ]
+                            }))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_typeof() {
+        assert_parse!(
+            "local x: typeof(y) = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::TypeOf(Expr::Var(Var::Name("y".to_string()))))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_wrap() {
+        assert_parse!(
+            "local x: (number) = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Wrap(Box::new(Type::Named(NamedType {
+                                table: None,
+                                name: "number".to_string(),
+                                params: vec![]
+                            }))))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_optional() {
+        assert_parse!(
+            "local x: number? = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Optional(Box::new(Type::Named(NamedType {
+                                table: None,
+                                name: "number".to_string(),
+                                params: vec![]
+                            }))))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_optional_nest() {
+        assert_parse!(
+            "local x: number?? = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Optional(Box::new(Type::Optional(Box::new(
+                                Type::Named(NamedType {
+                                    table: None,
+                                    name: "number".to_string(),
+                                    params: vec![]
+                                })
+                            )))))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_union() {
+        assert_parse!(
+            "local x: number | string | boolean = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Union(
+                                Box::new(Type::Union(
+                                    Box::new(Type::Named(NamedType {
+                                        table: None,
+                                        name: "number".to_string(),
+                                        params: vec![]
+                                    })),
+                                    Box::new(Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    }))
+                                )),
+                                Box::new(Type::Named(NamedType {
+                                    table: None,
+                                    name: "boolean".to_string(),
+                                    params: vec![]
+                                }))
+                            ))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_intersection() {
+        assert_parse!(
+            "local x: number & string & boolean = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Intersection(
+                                Box::new(Type::Intersection(
+                                    Box::new(Type::Named(NamedType {
+                                        table: None,
+                                        name: "number".to_string(),
+                                        params: vec![]
+                                    })),
+                                    Box::new(Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    }))
+                                )),
+                                Box::new(Type::Named(NamedType {
+                                    table: None,
+                                    name: "boolean".to_string(),
+                                    params: vec![]
+                                }))
+                            ))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_mix_union_intersection() {
+        assert_parse!(
+            "local x: number | string & boolean = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Union(
+                                Box::new(Type::Named(NamedType {
+                                    table: None,
+                                    name: "number".to_string(),
+                                    params: vec![]
+                                })),
+                                Box::new(Type::Intersection(
+                                    Box::new(Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    })),
+                                    Box::new(Type::Named(NamedType {
+                                        table: None,
+                                        name: "boolean".to_string(),
+                                        params: vec![]
+                                    }))
+                                ))
+                            ))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_mix_union_intersection_with_optional() {
+        assert_parse!(
+            "local x: number | string & boolean? = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Union(
+                                Box::new(Type::Named(NamedType {
+                                    table: None,
+                                    name: "number".to_string(),
+                                    params: vec![]
+                                })),
+                                Box::new(Type::Intersection(
+                                    Box::new(Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    })),
+                                    Box::new(Type::Optional(Box::new(Type::Named(NamedType {
+                                        table: None,
+                                        name: "boolean".to_string(),
+                                        params: vec![]
+                                    }))))
+                                ))
+                            ))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_assertion() {
+        assert_parse!(
+            "local x = 1::number",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: None
+                        }],
+                        init: vec![Expr::TypeAssertion(Box::new(TypeAssertion {
+                            expr: Expr::Number(1.0),
+                            ty: Type::Named(NamedType {
+                                table: None,
+                                name: "number".to_string(),
+                                params: vec![]
+                            })
+                        }))]
+                    }),
+                    vec![]
+                )]
             }
         );
     }
