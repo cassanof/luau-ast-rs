@@ -905,37 +905,39 @@ impl<'s, 'ts> Parser<'s> {
         node: tree_sitter::Node<'ts>,
         unp: &mut UnparsedStmts<'ts>,
     ) -> Result<Expr> {
-        let kind = node.kind();
-        match kind {
-            "nil" => Ok(Expr::Nil),
-            "number" => Ok(Expr::Number(self.parse_number(node)?)),
-            "string" => Ok(Expr::String(self.extract_text(node).to_string())),
-            "boolean" => Ok(Expr::Bool(self.parse_bool(node)?)),
-            "anon_fn" => Ok(Expr::Function(Box::new(
-                self.parse_fn_body(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
-            ))),
-            "vararg" => Ok(Expr::VarArg),
-            "exp_wrap" => Ok(Expr::Wrap(Box::new(
-                self.parse_expr(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
-            ))),
-            // delegate to parse_var
-            "var" => Ok(Expr::Var(self.parse_var(node, unp)?)),
-            // delegate to parse_binop
-            "binexp" => Ok(Expr::BinOp(Box::new(self.parse_binop(node, unp)?))),
-            // delegate to parse_unop
-            "unexp" => Ok(Expr::UnOp(Box::new(self.parse_unop(node, unp)?))),
-            // delegate to parse_call
-            "call_stmt" => Ok(Expr::Call(Box::new(self.parse_call(node, unp)?))),
-            // delegate to parse_tableconstructor
-            "table" => Ok(Expr::TableConstructor(
-                self.parse_tableconstructor(node, unp)?,
-            )),
-            // delegate to parse_ifexpr
-            "ifexp" => Ok(Expr::IfElseExpr(Box::new(self.parse_ifelseexp(node, unp)?))),
-            // delegate to parse_string_interp
-            "string_interp" => Ok(Expr::StringInterp(self.parse_string_interp(node, unp)?)),
-            _ => Err(self.error(node)),
-        }
+        stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+            let kind = node.kind();
+            match kind {
+                "nil" => Ok(Expr::Nil),
+                "number" => Ok(Expr::Number(self.parse_number(node)?)),
+                "string" => Ok(Expr::String(self.extract_text(node).to_string())),
+                "boolean" => Ok(Expr::Bool(self.parse_bool(node)?)),
+                "anon_fn" => Ok(Expr::Function(Box::new(
+                    self.parse_fn_body(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
+                ))),
+                "vararg" => Ok(Expr::VarArg),
+                "exp_wrap" => Ok(Expr::Wrap(Box::new(
+                    self.parse_expr(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
+                ))),
+                // delegate to parse_var
+                "var" => Ok(Expr::Var(self.parse_var(node, unp)?)),
+                // delegate to parse_binop
+                "binexp" => Ok(Expr::BinOp(Box::new(self.parse_binop(node, unp)?))),
+                // delegate to parse_unop
+                "unexp" => Ok(Expr::UnOp(Box::new(self.parse_unop(node, unp)?))),
+                // delegate to parse_call
+                "call_stmt" => Ok(Expr::Call(Box::new(self.parse_call(node, unp)?))),
+                // delegate to parse_tableconstructor
+                "table" => Ok(Expr::TableConstructor(
+                    self.parse_tableconstructor(node, unp)?,
+                )),
+                // delegate to parse_ifexpr
+                "ifexp" => Ok(Expr::IfElseExpr(Box::new(self.parse_ifelseexp(node, unp)?))),
+                // delegate to parse_string_interp
+                "string_interp" => Ok(Expr::StringInterp(self.parse_string_interp(node, unp)?)),
+                _ => Err(self.error(node)),
+            }
+        })
     }
 
     fn parse_number(&mut self, node: tree_sitter::Node<'ts>) -> Result<f64> {
