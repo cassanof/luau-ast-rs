@@ -109,23 +109,25 @@ macro_rules! impl_visitor_driver {
 
         fn drive_expr(&mut self, expr: $($ref)+ Expr, unv: &mut UnvisitedStmts) {
             self.visitor.visit_expr(expr);
-            match expr {
-                Expr::Number(n) => self.visitor.visit_number(n),
-                Expr::String(s) => self.visitor.visit_string(s),
-                Expr::Nil => self.visitor.visit_nil(),
-                Expr::Bool(b) => self.visitor.visit_bool(b),
-                Expr::VarArg => self.visitor.visit_vararg(),
-                Expr::Var(v) => self.drive_var(v, unv),
-                Expr::Wrap(e) => self.drive_wrap(e, unv),
-                Expr::Call(c) => self.drive_call(c, unv),
-                Expr::TableConstructor(t) => self.drive_table_constructor(t, unv),
-                Expr::Function(f) => self.drive_function_expr(f, unv),
-                Expr::IfElseExpr(e) => self.drive_if_else_expr(e, unv),
-                Expr::BinOp(b) => self.drive_bin_op(b, unv),
-                Expr::UnOp(u) => self.drive_un_op(u, unv),
-                Expr::StringInterp(s) => self.drive_string_interp(s, unv),
-                Expr::TypeAssertion(t) => self.drive_type_assertion(t, unv),
-            }
+            stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+                match expr {
+                    Expr::Number(n) => self.visitor.visit_number(n),
+                    Expr::String(s) => self.visitor.visit_string(s),
+                    Expr::Nil => self.visitor.visit_nil(),
+                    Expr::Bool(b) => self.visitor.visit_bool(b),
+                    Expr::VarArg => self.visitor.visit_vararg(),
+                    Expr::Var(v) => self.drive_var(v, unv),
+                    Expr::Wrap(e) => self.drive_wrap(e, unv),
+                    Expr::Call(c) => self.drive_call(c, unv),
+                    Expr::TableConstructor(t) => self.drive_table_constructor(t, unv),
+                    Expr::Function(f) => self.drive_function_expr(f, unv),
+                    Expr::IfElseExpr(e) => self.drive_if_else_expr(e, unv),
+                    Expr::BinOp(b) => self.drive_bin_op(b, unv),
+                    Expr::UnOp(u) => self.drive_un_op(u, unv),
+                    Expr::StringInterp(s) => self.drive_string_interp(s, unv),
+                    Expr::TypeAssertion(t) => self.drive_type_assertion(t, unv),
+                }
+            });
         }
 
         fn drive_comp_op(&mut self, comp_op: $($ref)+ CompOp, unv: &mut UnvisitedStmts) {

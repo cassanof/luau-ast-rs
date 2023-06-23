@@ -1089,6 +1089,8 @@ impl<'s, 'ts> Parser<'s> {
         node: tree_sitter::Node<'ts>,
         unp: &mut UnparsedStmts<'ts>,
     ) -> Result<Expr> {
+        // grows the call stack if needed, such that large expressions can be parsed
+        // without stack overflow
         stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
             let kind = node.kind();
             match kind {
