@@ -187,7 +187,11 @@ pub struct Assign {
 pub struct FunctionBody {
     pub params: Vec<Binding>,
     pub generics: Vec<GenericParam>,
-    pub vararg: bool,
+    /// The variadic argument, if any.
+    /// None: no variadic argument
+    /// Some(None): variadic argument with no type
+    /// Some(Some(ty)): variadic argument with type
+    pub vararg: Option<Option<Type>>,
     pub ret_ty: Option<TypeOrPack>,
     pub block: Block,
 }
@@ -402,6 +406,14 @@ pub struct TypeAssertion {
     pub ty: Type,
 }
 
+/// Represents a type list. e.g. `(a, b, c)`. or `(a, b, c, ...d)`
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TypeList {
+    pub types: Vec<Type>,
+    pub vararg: Option<Type>,
+}
+
 /// Represents a statement node in the AST.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -499,9 +511,10 @@ pub enum CompOpKind {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
-    // \ compounds, should be their own node but we don't care /
-    /// ...T
-    Variadic(Box<Type>),
+    // \ special nodes, should be their own node but we don't care /
+    /// T...
+    /// This can typically only occur at the last parameter of a function.
+    Pack(Box<Type>),
     // \ simple types /
     /// `( T )`
     Wrap(Box<Type>),
@@ -533,18 +546,19 @@ pub enum Type {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeOrPack {
     Type(Type),
-    TypePack(TypePack),
+    Pack(TypePack),
 }
 
 /// Represents a type pack
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypePack {
-    // TODO
-    /*
     /// `( T, U )` or `( T, U, ...V )`
-    Pack(Vec<Type>),
-    */
+    Listed(TypeList),
+    /// `...T`
+    Variadic(Type),
+    /// `T...`
+    Generic(Type),
 }
 
 /// Represents a table property or indexer.

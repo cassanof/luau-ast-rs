@@ -301,7 +301,7 @@ impl<'s, 'ts> Parser<'s> {
         let mut params = Vec::new();
         let mut block = None;
         let mut generics = Vec::new();
-        let mut vararg = false;
+        let mut vararg = None;
         let mut ret_ty = None;
 
         enum State {
@@ -330,7 +330,9 @@ impl<'s, 'ts> Parser<'s> {
                 ("(", State::Generics | State::Params) => state = State::Params,
                 ("param", State::Params) => match node.child(0) {
                     // yuck...
-                    Some(n) if n.kind() == "vararg" => vararg = true,
+                    Some(n) if n.kind() == "vararg" => {
+                        vararg = Some(self.parse_vararg(node, unp)?);
+                    }
                     Some(n) if n.kind() == "comment" => self.parse_comment_tr(n),
                     _ => params.push(self.parse_binding(node, unp)?),
                 },
@@ -338,7 +340,7 @@ impl<'s, 'ts> Parser<'s> {
                 (":", State::Block) => state = State::RetTy,
                 ("comment", _) => self.parse_comment_tr(node),
                 (_, State::RetTy) => {
-                    eprintln!("TODO: parse_fn_body: type ({})", kind);
+                    ret_ty = Some(self.parse_type_or_pack(node, unp)?);
                     state = State::Block;
                 }
                 ("block", State::Block) => {
@@ -358,6 +360,30 @@ impl<'s, 'ts> Parser<'s> {
             // there may be no block if the function is empty
             block: block.unwrap_or_default(),
         })
+    }
+
+    fn parse_vararg(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<Option<Type>> {
+        let cursor = &mut node.walk();
+        let mut res = None;
+        let mut next_is_type = false;
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match kind {
+                "vararg" => {}
+                ":" => next_is_type = true,
+                _ if next_is_type => {
+                    res = Some(self.parse_type(child, unp)?);
+                    break;
+                }
+                "comment" => self.parse_comment_tr(child),
+                _ => todo!("vararg: {:?}", kind),
+            }
+        }
+        Ok(res)
     }
 
     fn parse_function_def(
@@ -938,10 +964,61 @@ impl<'s, 'ts> Parser<'s> {
             "untype" => Ok(Type::Optional(Box::new(
                 self.parse_type(node.child(0).ok_or_else(|| self.error(node))?, unp)?,
             ))),
-            "namedtype" => Ok(Type::Named(self.parse_type_named(node, unp)?)),
+            "namedtype" | "generic" => Ok(Type::Named(self.parse_named_type(node, unp)?)),
             "bintype" => self.parse_bintype(node, unp),
+            "tbtype" => Ok(Type::Table(self.parse_table_type(node, unp)?)),
+            "packtype" => Ok(Type::Pack(Box::new(
+                self.parse_type(node.child(0).ok_or_else(|| self.error(node))?, unp)?,
+            ))),
             _ => todo!("parse_type {}: {}", kind, self.extract_text(node)),
         }
+    }
+
+    fn parse_table_type(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<TableType> {
+        let cursor = &mut node.walk();
+        let mut props = Vec::new();
+
+        enum State<'s, 'ts> {
+            Init,
+            PropType(&'s str),
+            IndexerTypeNext,
+            IndexerType(tree_sitter::Node<'ts>),
+        }
+
+        let mut state = State::Init;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &state) {
+                ("{" | "}" | "," | ";", State::Init) => {}
+                ("name", State::Init) => state = State::PropType(self.extract_text(child)),
+                (":", State::PropType(_) | State::IndexerType(_)) => {}
+                ("[", State::Init) => state = State::IndexerTypeNext,
+                ("]", State::IndexerType(_)) => {}
+                ("comment", _) => self.parse_comment_tr(child),
+                (_, State::PropType(key)) => {
+                    props.push(TableProp::Prop {
+                        key: key.to_string(),
+                        value: self.parse_type(child, unp)?,
+                    });
+                    state = State::Init;
+                }
+                (_, State::IndexerTypeNext) => state = State::IndexerType(child),
+                (_, State::IndexerType(indexer)) => {
+                    props.push(TableProp::Indexer {
+                        key: self.parse_type(*indexer, unp)?,
+                        value: self.parse_type(child, unp)?,
+                    });
+                    state = State::Init;
+                }
+                _ => todo!("parse_table_type {}: {}", kind, self.extract_text(child)),
+            }
+        }
+        Ok(TableType { props })
     }
 
     fn parse_bintype(
@@ -1001,7 +1078,7 @@ impl<'s, 'ts> Parser<'s> {
         }
     }
 
-    fn parse_type_named(
+    fn parse_named_type(
         &mut self,
         node: tree_sitter::Node<'ts>,
         unp: &mut UnparsedStmts<'ts>,
@@ -1011,6 +1088,7 @@ impl<'s, 'ts> Parser<'s> {
         let mut name = String::new();
         let mut params = Vec::new();
 
+        #[derive(Debug)] // TODO: remove
         enum State {
             Name,
             Field,
@@ -1022,8 +1100,11 @@ impl<'s, 'ts> Parser<'s> {
         for child in node.children(cursor) {
             let kind = child.kind();
             match (kind, &state) {
-                ("name", State::Name) => name.push_str(self.extract_text(child)),
-                (".", State::Name) => {
+                ("name", State::Name) => {
+                    name.push_str(self.extract_text(child));
+                    state = State::Params
+                }
+                (".", State::Name | State::Params) => {
                     table = Some(name);
                     name = String::new();
                     state = State::Field;
@@ -1077,11 +1158,85 @@ impl<'s, 'ts> Parser<'s> {
         let kind = node.kind();
         match kind {
             // ugly, i know
-            "namedtype" | "wraptype" | "dyntype" | "fntype" | "tbtype" | "bintype" | "untype" => {
-                Ok(TypeOrPack::Type(self.parse_type(node, unp)?))
-            }
+            "packtype" | "namedtype" | "wraptype" | "dyntype" | "fntype" | "tbtype" | "bintype"
+            | "untype" => Ok(TypeOrPack::Type(self.parse_type(node, unp)?)),
+            "typepack" => Ok(TypeOrPack::Pack(self.parse_type_pack(node, unp)?)),
             _ => todo!("parse_type_or_pack {}: {}", kind, self.extract_text(node)),
         }
+    }
+
+    fn parse_type_pack(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<TypePack> {
+        let cursor = &mut node.walk();
+
+        #[derive(Debug)] // TODO: remove
+        enum State {
+            Init,
+            List,
+        }
+
+        let mut state = State::Init;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &state) {
+                ("variadic", State::Init) => {
+                    return Ok(TypePack::Variadic(self.parse_type(
+                        child.child(1).ok_or_else(|| self.error(child))?,
+                        unp,
+                    )?))
+                }
+                ("genpack", State::Init) => {
+                    return Ok(TypePack::Generic(self.parse_type(
+                        child.child(0).ok_or_else(|| self.error(child))?,
+                        unp,
+                    )?))
+                }
+                ("(", State::Init) => {
+                    state = State::List;
+                }
+                (")", State::List) => {
+                    // edge case: empty list
+                    return Ok(TypePack::Listed(TypeList::default()));
+                }
+                (_, State::List) => return Ok(TypePack::Listed(self.parse_type_list(child, unp)?)),
+                ("comment", _) => self.parse_comment_tr(child),
+                _ => todo!(
+                    "parse_type_pack {:?} {}: {}",
+                    state,
+                    kind,
+                    self.extract_text(node)
+                ),
+                _ => return Err(self.error(child)),
+            }
+        }
+        Err(self.error(node))
+    }
+
+    fn parse_type_list(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<TypeList> {
+        let cursor = &mut node.walk();
+        let mut typelist = TypeList::default();
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match kind {
+                "variadic" => {
+                    typelist.vararg = Some(
+                        self.parse_type(child.child(1).ok_or_else(|| self.error(child))?, unp)?,
+                    )
+                }
+                "," => {}
+                "comment" => self.parse_comment_tr(child),
+                _ => typelist.types.push(self.parse_type(child, unp)?),
+            }
+        }
+        Ok(typelist)
     }
 
     fn parse_expr(
@@ -1151,7 +1306,6 @@ impl<'s, 'ts> Parser<'s> {
     ) -> Result<Var> {
         let cursor = &mut node.walk();
 
-        #[derive(Debug)]
         enum State<'ts> {
             Init,
             TableExpr(tree_sitter::Node<'ts>),
@@ -1875,7 +2029,7 @@ mod tests {
                                 ret_ty: None,
                                 block: Block { stmt_ptrs: vec![2] },
                                 generics: vec![],
-                                vararg: false,
+                                vararg: None,
                                 params: vec![Binding {
                                     name: "n".to_string(),
                                     ty: None
@@ -1925,7 +2079,7 @@ mod tests {
                             body: FunctionBody {
                                 ret_ty: None,
                                 block: Block { stmt_ptrs: vec![2] },
-                                vararg: false,
+                                vararg: None,
                                 generics: vec![],
                                 params: vec![Binding {
                                     name: "n".to_string(),
@@ -1981,7 +2135,7 @@ mod tests {
                             name: "f".to_string(),
                             body: FunctionBody {
                                 ret_ty: None,
-                                vararg: false,
+                                vararg: None,
                                 block: Block { stmt_ptrs: vec![2] },
                                 generics: vec![],
                                 params: vec![Binding {
@@ -2051,7 +2205,7 @@ mod tests {
                             name: "f".to_string(),
                             body: FunctionBody {
                                 ret_ty: None,
-                                vararg: false,
+                                vararg: None,
                                 block: Block {
                                     stmt_ptrs: vec![2, 3]
                                 },
@@ -2114,7 +2268,7 @@ mod tests {
                             body: FunctionBody {
                                 generics: vec![],
                                 ret_ty: None,
-                                vararg: false,
+                                vararg: None,
                                 block: Block { stmt_ptrs: vec![1] },
                                 params: vec![Binding {
                                     name: "n".to_string(),
@@ -2152,7 +2306,7 @@ mod tests {
                             body: FunctionBody {
                                 generics: vec![],
                                 ret_ty: None,
-                                vararg: false,
+                                vararg: None,
                                 block: Block { stmt_ptrs: vec![1] },
                                 params: vec![Binding {
                                     name: "n".to_string(),
@@ -2189,7 +2343,7 @@ mod tests {
                             name: "f".to_string(),
                             body: FunctionBody {
                                 generics: vec![],
-                                vararg: false,
+                                vararg: None,
                                 ret_ty: None,
                                 block: Block { stmt_ptrs: vec![1] },
                                 params: vec![Binding {
@@ -2230,7 +2384,7 @@ mod tests {
                             name: "f".to_string(),
                             body: FunctionBody {
                                 ret_ty: None,
-                                vararg: false,
+                                vararg: None,
                                 generics: vec![],
                                 block: Block { stmt_ptrs: vec![1] },
                                 params: vec![Binding {
@@ -2273,7 +2427,7 @@ mod tests {
                             name: "f".to_string(),
                             body: FunctionBody {
                                 ret_ty: None,
-                                vararg: false,
+                                vararg: None,
                                 generics: vec![],
                                 block: Block {
                                     stmt_ptrs: vec![2], // print(n)
@@ -2318,7 +2472,7 @@ mod tests {
                         name: "f".to_string(),
                         body: FunctionBody {
                             ret_ty: None,
-                            vararg: false,
+                            vararg: None,
                             generics: vec![
                                 GenericParam::Name("T".to_string()),
                                 GenericParam::Pack("U".to_string())
@@ -2349,7 +2503,7 @@ mod tests {
                         name: "f".to_string(),
                         body: FunctionBody {
                             ret_ty: None,
-                            vararg: false,
+                            vararg: None,
                             generics: vec![],
                             block: Block { stmt_ptrs: vec![] },
                             params: vec![]
@@ -2815,7 +2969,7 @@ mod tests {
                             is_method: false,
                             body: FunctionBody {
                                 ret_ty: None,
-                                vararg: false,
+                                vararg: None,
                                 generics: vec![],
                                 block: Block {
                                     stmt_ptrs: vec![1, 2, 3]
@@ -2853,7 +3007,7 @@ mod tests {
                             body: FunctionBody {
                                 ret_ty: None,
                                 generics: vec![],
-                                vararg: true,
+                                vararg: Some(None),
                                 block: Block { stmt_ptrs: vec![] },
                                 params: vec![],
                             },
@@ -3357,7 +3511,7 @@ mod tests {
                             }],
                             init: vec![Expr::Function(Box::new(FunctionBody {
                                 generics: vec![],
-                                vararg: false,
+                                vararg: None,
                                 ret_ty: None,
                                 params: vec![
                                     Binding {
@@ -4143,9 +4297,13 @@ mod tests {
                         is_method: false,
                         body: FunctionBody {
                             params: vec![],
-                            vararg: false,
+                            vararg: None,
                             generics: vec![],
-                            ret_ty: None,
+                            ret_ty: Some(TypeOrPack::Type(Type::Named(NamedType {
+                                table: None,
+                                name: "number".to_string(),
+                                params: vec![]
+                            }))),
                             block: Block { stmt_ptrs: vec![] }
                         },
                     }),
@@ -4297,7 +4455,7 @@ mod tests {
                             is_method: false,
                             body: FunctionBody {
                                 params: vec![],
-                                vararg: false,
+                                vararg: None,
                                 generics: vec![],
                                 ret_ty: None,
                                 block: Block { stmt_ptrs: vec![1] }
@@ -4905,6 +5063,516 @@ end
                                 params: vec![]
                             })
                         }))]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_table_prop() {
+        assert_parse!(
+            "local x: {a: number, b: string} = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Table(TableType {
+                                props: vec![
+                                    TableProp::Prop {
+                                        key: "a".to_string(),
+                                        value: Type::Named(NamedType {
+                                            table: None,
+                                            name: "number".to_string(),
+                                            params: vec![]
+                                        })
+                                    },
+                                    TableProp::Prop {
+                                        key: "b".to_string(),
+                                        value: Type::Named(NamedType {
+                                            table: None,
+                                            name: "string".to_string(),
+                                            params: vec![]
+                                        })
+                                    }
+                                ]
+                            }))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+    #[test]
+    fn test_type_table_indexer() {
+        assert_parse!(
+            "local x: {[number]: number, [nil]: string} = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Table(TableType {
+                                props: vec![
+                                    TableProp::Indexer {
+                                        key: Type::Named(NamedType {
+                                            table: None,
+                                            name: "number".to_string(),
+                                            params: vec![]
+                                        }),
+                                        value: Type::Named(NamedType {
+                                            table: None,
+                                            name: "number".to_string(),
+                                            params: vec![]
+                                        })
+                                    },
+                                    TableProp::Indexer {
+                                        key: Type::Nil,
+                                        value: Type::Named(NamedType {
+                                            table: None,
+                                            name: "string".to_string(),
+                                            params: vec![]
+                                        })
+                                    }
+                                ]
+                            }))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_table_empty() {
+        assert_parse!(
+            "local x: {} = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Table(TableType { props: vec![] }))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_function_typed() {
+        assert_parse!(
+            "function f(x: number, y: string): number end",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            ret_ty: Some(TypeOrPack::Type(Type::Named(NamedType {
+                                table: None,
+                                name: "number".to_string(),
+                                params: vec![]
+                            }))),
+                            block: Block { stmt_ptrs: vec![] },
+                            generics: vec![],
+                            vararg: None,
+                            params: vec![
+                                Binding {
+                                    name: "x".to_string(),
+                                    ty: Some(Type::Named(NamedType {
+                                        table: None,
+                                        name: "number".to_string(),
+                                        params: vec![]
+                                    }))
+                                },
+                                Binding {
+                                    name: "y".to_string(),
+                                    ty: Some(Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    }))
+                                }
+                            ],
+                        },
+                        table: vec![],
+                        is_method: false
+                    }),
+                    vec![]
+                ),]
+            }
+        );
+    }
+
+    #[test]
+    fn test_function_typed_generic() {
+        assert_parse!(
+            "function f<T, R>(x: T, y: T): R end",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            ret_ty: Some(TypeOrPack::Type(Type::Named(NamedType {
+                                table: None,
+                                name: "R".to_string(),
+                                params: vec![]
+                            }))),
+                            block: Block { stmt_ptrs: vec![] },
+                            generics: vec![
+                                GenericParam::Name("T".to_string()),
+                                GenericParam::Name("R".to_string()),
+                            ],
+                            vararg: None,
+                            params: vec![
+                                Binding {
+                                    name: "x".to_string(),
+                                    ty: Some(Type::Named(NamedType {
+                                        table: None,
+                                        name: "T".to_string(),
+                                        params: vec![]
+                                    }))
+                                },
+                                Binding {
+                                    name: "y".to_string(),
+                                    ty: Some(Type::Named(NamedType {
+                                        table: None,
+                                        name: "T".to_string(),
+                                        params: vec![]
+                                    }))
+                                }
+                            ],
+                        },
+                        table: vec![],
+                        is_method: false
+                    }),
+                    vec![]
+                ),]
+            }
+        );
+    }
+
+    #[test]
+    fn test_function_typed_generic_pack() {
+        assert_parse!(
+            "function f<T, R, U...>(x: T, ...: U): R end",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            ret_ty: Some(TypeOrPack::Type(Type::Named(NamedType {
+                                table: None,
+                                name: "R".to_string(),
+                                params: vec![]
+                            }))),
+                            block: Block { stmt_ptrs: vec![] },
+                            generics: vec![
+                                GenericParam::Name("T".to_string()),
+                                GenericParam::Name("R".to_string()),
+                                GenericParam::Pack("U".to_string()),
+                            ],
+                            vararg: Some(Some(Type::Named(NamedType {
+                                table: None,
+                                name: "U".to_string(),
+                                params: vec![]
+                            }))),
+                            params: vec![Binding {
+                                name: "x".to_string(),
+                                ty: Some(Type::Named(NamedType {
+                                    table: None,
+                                    name: "T".to_string(),
+                                    params: vec![]
+                                }))
+                            },],
+                        },
+                        table: vec![],
+                        is_method: false
+                    }),
+                    vec![]
+                ),]
+            }
+        );
+    }
+
+    #[test]
+    fn test_function_typed_generic_pack_unpacked() {
+        assert_parse!(
+            "function f<T, R, U...>(x: T, ...: U...): R end",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::FunctionDef(FunctionDef {
+                        name: "f".to_string(),
+                        body: FunctionBody {
+                            ret_ty: Some(TypeOrPack::Type(Type::Named(NamedType {
+                                table: None,
+                                name: "R".to_string(),
+                                params: vec![]
+                            }))),
+                            block: Block { stmt_ptrs: vec![] },
+                            generics: vec![
+                                GenericParam::Name("T".to_string()),
+                                GenericParam::Name("R".to_string()),
+                                GenericParam::Pack("U".to_string()),
+                            ],
+                            vararg: Some(Some(Type::Pack(Box::new(Type::Named(NamedType {
+                                table: None,
+                                name: "U".to_string(),
+                                params: vec![]
+                            }))))),
+                            params: vec![Binding {
+                                name: "x".to_string(),
+                                ty: Some(Type::Named(NamedType {
+                                    table: None,
+                                    name: "T".to_string(),
+                                    params: vec![]
+                                }))
+                            },],
+                        },
+                        table: vec![],
+                        is_method: false
+                    }),
+                    vec![]
+                ),]
+            }
+        );
+    }
+
+    #[test]
+    fn test_generic_param() {
+        assert_parse!(
+            "local x: A<number, string> = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Named(NamedType {
+                                table: None,
+                                name: "A".to_string(),
+                                params: vec![
+                                    TypeOrPack::Type(Type::Named(NamedType {
+                                        table: None,
+                                        name: "number".to_string(),
+                                        params: vec![]
+                                    })),
+                                    TypeOrPack::Type(Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    })),
+                                ]
+                            }))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_generic_param_typepack_empty() {
+        assert_parse!(
+            "local x: A<(), string> = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Named(NamedType {
+                                table: None,
+                                name: "A".to_string(),
+                                params: vec![
+                                    TypeOrPack::Pack(TypePack::Listed(TypeList {
+                                        types: vec![],
+                                        vararg: None
+                                    })),
+                                    TypeOrPack::Type(Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    })),
+                                ]
+                            }))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_generic_param_typepack() {
+        assert_parse!(
+            "local x: A<(number, number), string> = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Named(NamedType {
+                                table: None,
+                                name: "A".to_string(),
+                                params: vec![
+                                    TypeOrPack::Pack(TypePack::Listed(TypeList {
+                                        types: vec![
+                                            Type::Named(NamedType {
+                                                table: None,
+                                                name: "number".to_string(),
+                                                params: vec![]
+                                            }),
+                                            Type::Named(NamedType {
+                                                table: None,
+                                                name: "number".to_string(),
+                                                params: vec![]
+                                            })
+                                        ],
+                                        vararg: None
+                                    })),
+                                    TypeOrPack::Type(Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    })),
+                                ]
+                            }))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_generic_param_typepack_variadic() {
+        assert_parse!(
+            "local x: A<(number, ...number), string> = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Named(NamedType {
+                                table: None,
+                                name: "A".to_string(),
+                                params: vec![
+                                    TypeOrPack::Pack(TypePack::Listed(TypeList {
+                                        types: vec![Type::Named(NamedType {
+                                            table: None,
+                                            name: "number".to_string(),
+                                            params: vec![]
+                                        }),],
+                                        vararg: Some(Type::Named(NamedType {
+                                            table: None,
+                                            name: "number".to_string(),
+                                            params: vec![]
+                                        }))
+                                    })),
+                                    TypeOrPack::Type(Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    })),
+                                ]
+                            }))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_generic_param_variadic_typepack() {
+        assert_parse!(
+            "local x: A<...number, string> = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Named(NamedType {
+                                table: None,
+                                name: "A".to_string(),
+                                params: vec![
+                                    TypeOrPack::Pack(TypePack::Variadic(Type::Named(NamedType {
+                                        table: None,
+                                        name: "number".to_string(),
+                                        params: vec![]
+                                    }))),
+                                    TypeOrPack::Type(Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    })),
+                                ]
+                            }))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_generic_param_generic_typepack() {
+        assert_parse!(
+            "local x: A<number..., string> = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Named(NamedType {
+                                table: None,
+                                name: "A".to_string(),
+                                params: vec![
+                                    TypeOrPack::Pack(TypePack::Generic(Type::Named(NamedType {
+                                        table: None,
+                                        name: "number".to_string(),
+                                        params: vec![]
+                                    }))),
+                                    TypeOrPack::Type(Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    })),
+                                ]
+                            }))
+                        }],
+                        init: vec![Expr::Nil]
                     }),
                     vec![]
                 )]
