@@ -21,5 +21,5 @@ lazy_static = "1.4.0"
 serde = { version = "1.0.164", features = ["derive"], optional = true }
 thiserror = "1.0.40"
 tree-sitter = "0.20.10"
-luau-ast-rs-grammar = { version = "0.0.1", path = "./tree-sitter-luau" }
+luau-ast-rs-grammar = { version = "0.0.2" }
 stacker = "0.1.15"
