@@ -380,7 +380,7 @@ impl<'s, 'ts> Parser<'s> {
                     break;
                 }
                 "comment" => self.parse_comment_tr(child),
-                _ => todo!("vararg: {:?}", kind),
+                _ => return Err(self.error(child)),
             }
         }
         Ok(res)
@@ -964,13 +964,17 @@ impl<'s, 'ts> Parser<'s> {
             "untype" => Ok(Type::Optional(Box::new(
                 self.parse_type(node.child(0).ok_or_else(|| self.error(node))?, unp)?,
             ))),
-            "namedtype" | "generic" => Ok(Type::Named(self.parse_named_type(node, unp)?)),
+            "namedtype" | "name" | "generic" => Ok(Type::Named(self.parse_named_type(node, unp)?)),
             "bintype" => self.parse_bintype(node, unp),
             "tbtype" => Ok(Type::Table(self.parse_table_type(node, unp)?)),
             "packtype" => Ok(Type::Pack(Box::new(
                 self.parse_type(node.child(0).ok_or_else(|| self.error(node))?, unp)?,
             ))),
-            _ => todo!("parse_type {}: {}", kind, self.extract_text(node)),
+            "fntype" => {
+                eprintln!("TODO: parse_type: fntype");
+                Err(self.error(node))
+            }
+            _ => Err(self.error(node)),
         }
     }
 
@@ -1015,7 +1019,7 @@ impl<'s, 'ts> Parser<'s> {
                     });
                     state = State::Init;
                 }
-                _ => todo!("parse_table_type {}: {}", kind, self.extract_text(child)),
+                _ => return Err(self.error(child)),
             }
         }
         Ok(TableType { props })
@@ -1161,7 +1165,14 @@ impl<'s, 'ts> Parser<'s> {
             "packtype" | "namedtype" | "wraptype" | "dyntype" | "fntype" | "tbtype" | "bintype"
             | "untype" => Ok(TypeOrPack::Type(self.parse_type(node, unp)?)),
             "typepack" => Ok(TypeOrPack::Pack(self.parse_type_pack(node, unp)?)),
-            _ => todo!("parse_type_or_pack {}: {}", kind, self.extract_text(node)),
+            _ => {
+                eprintln!(
+                    "TODO: parse_type_or_pack {}: {}",
+                    kind,
+                    self.extract_text(node)
+                );
+                Err(self.error(node))
+            }
         }
     }
 
@@ -1204,12 +1215,6 @@ impl<'s, 'ts> Parser<'s> {
                 }
                 (_, State::List) => return Ok(TypePack::Listed(self.parse_type_list(child, unp)?)),
                 ("comment", _) => self.parse_comment_tr(child),
-                _ => todo!(
-                    "parse_type_pack {:?} {}: {}",
-                    state,
-                    kind,
-                    self.extract_text(node)
-                ),
                 _ => return Err(self.error(child)),
             }
         }
