@@ -292,7 +292,7 @@ impl<'s, 'ts> Parser<'s> {
         Ok(Local { bindings, init })
     }
 
-    fn parse_fn_body(
+    fn parse_function_body(
         &mut self,
         // NOTE: the node has to be the "(" or "<" of the function def
         node: tree_sitter::Node<'ts>,
@@ -429,7 +429,7 @@ impl<'s, 'ts> Parser<'s> {
                     table.push(table_name[1..].to_string());
                 }
                 "<" | "(" => {
-                    let parsed_body = self.parse_fn_body(child, unp)?;
+                    let parsed_body = self.parse_function_body(child, unp)?;
                     body = Some(parsed_body);
                     break;
                 }
@@ -469,7 +469,7 @@ impl<'s, 'ts> Parser<'s> {
             match kind {
                 "name" => name.push_str(self.extract_text(child)),
                 "<" | "(" => {
-                    let parsed_body = self.parse_fn_body(child, unp)?;
+                    let parsed_body = self.parse_function_body(child, unp)?;
                     body = Some(parsed_body);
                     break;
                 }
@@ -970,12 +970,50 @@ impl<'s, 'ts> Parser<'s> {
             "packtype" => Ok(Type::Pack(Box::new(
                 self.parse_type(node.child(0).ok_or_else(|| self.error(node))?, unp)?,
             ))),
-            "fntype" => {
-                eprintln!("TODO: parse_type: fntype");
-                Err(self.error(node))
-            }
+            "fntype" => Ok(Type::Function(Box::new(
+                self.parse_function_type(node, unp)?,
+            ))),
             _ => Err(self.error(node)),
         }
+    }
+
+    fn parse_function_type(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<FunctionType> {
+        let cursor = &mut node.walk();
+        let mut params = TypeList::default();
+        let mut generics = vec![];
+        let mut ret_ty = None;
+
+        enum State {
+            Init,
+            Return,
+        }
+
+        let mut state = State::Init;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &state) {
+                ("paramlist", State::Init) => {
+                    params = self.parse_type_list(child, unp)?;
+                    state = State::Return;
+                }
+                (_, State::Return) => {
+                    ret_ty = Some(self.parse_type_or_pack(child, unp)?);
+                }
+                ("comment", _) => self.parse_comment_tr(child),
+                _ => todo!("parse_function_type: {}", kind),
+            }
+        }
+
+        Ok(FunctionType {
+            params,
+            generics,
+            ret_ty: ret_ty.ok_or_else(|| self.error(node))?,
+        })
     }
 
     fn parse_table_type(
@@ -1099,7 +1137,6 @@ impl<'s, 'ts> Parser<'s> {
         let mut name = String::new();
         let mut params = Vec::new();
 
-        #[derive(Debug)] // TODO: remove
         enum State {
             Name,
             Field,
@@ -1169,10 +1206,10 @@ impl<'s, 'ts> Parser<'s> {
         let kind = node.kind();
         match kind {
             // TODO:
-            // ugly, i know, this is temporary, we will match all types, and leave typepack as 
+            // ugly, i know, this is temporary, we will match all types, and leave typepack as
             // the only one
-            "name" | "generic" | "singleton" | "packtype" | "namedtype"
-            | "wraptype" | "dyntype" | "fntype" | "tbtype" | "bintype" | "untype" => {
+            "name" | "generic" | "singleton" | "packtype" | "namedtype" | "wraptype"
+            | "dyntype" | "fntype" | "tbtype" | "bintype" | "untype" => {
                 Ok(TypeOrPack::Type(self.parse_type(node, unp)?))
             }
             "typepack" => Ok(TypeOrPack::Pack(self.parse_type_pack(node, unp)?)),
@@ -1194,7 +1231,6 @@ impl<'s, 'ts> Parser<'s> {
     ) -> Result<TypePack> {
         let cursor = &mut node.walk();
 
-        #[derive(Debug)] // TODO: remove
         enum State {
             Init,
             List,
@@ -1247,7 +1283,7 @@ impl<'s, 'ts> Parser<'s> {
                         self.parse_type(child.child(1).ok_or_else(|| self.error(child))?, unp)?,
                     )
                 }
-                "," => {}
+                "(" | ")" | "->" | "," => {}
                 "comment" => self.parse_comment_tr(child),
                 _ => typelist.types.push(self.parse_type(child, unp)?),
             }
@@ -1269,9 +1305,10 @@ impl<'s, 'ts> Parser<'s> {
                 "number" => Ok(Expr::Number(self.parse_number(node)?)),
                 "string" => Ok(Expr::String(self.extract_text(node).to_string())),
                 "boolean" => Ok(Expr::Bool(self.parse_bool(node)?)),
-                "anon_fn" => Ok(Expr::Function(Box::new(
-                    self.parse_fn_body(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
-                ))),
+                "anon_fn" => Ok(Expr::Function(Box::new(self.parse_function_body(
+                    node.child(1).ok_or_else(|| self.error(node))?,
+                    unp,
+                )?))),
                 "vararg" => Ok(Expr::VarArg),
                 "exp_wrap" => Ok(Expr::Wrap(Box::new(
                     self.parse_expr(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
@@ -5597,22 +5634,74 @@ end
     }
 
     #[test]
-    fn test_regression_table_array() {
+    fn test_type_function_simple() {
         assert_parse!(
-            "local x: { T } = nil",
+            "local x: (string) -> number = nil",
             Chunk {
                 block: Block { stmt_ptrs: vec![0] },
                 stmts: vec![StmtStatus::Some(
                     Stmt::Local(Local {
                         bindings: vec![Binding {
                             name: "x".to_string(),
-                            ty: Some(Type::Table(TableType {
-                                props: vec![TableProp::Array(Type::Named(NamedType {
+                            ty: Some(Type::Function(Box::new(FunctionType {
+                                generics: vec![],
+                                params: TypeList {
+                                    types: vec![Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    })],
+                                    vararg: None
+                                },
+                                ret_ty: TypeOrPack::Type(Type::Named(NamedType {
                                     table: None,
-                                    name: "T".to_string(),
+                                    name: "number".to_string(),
                                     params: vec![]
-                                }))]
-                            }))
+                                }))
+                            })))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_function_multi_arg() {
+        assert_parse!(
+            "local x: (string, string, string) -> nil = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Function(Box::new(FunctionType {
+                                generics: vec![],
+                                params: TypeList {
+                                    types: vec![
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "string".to_string(),
+                                            params: vec![]
+                                        }),
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "string".to_string(),
+                                            params: vec![]
+                                        }),
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "string".to_string(),
+                                            params: vec![]
+                                        })
+                                    ],
+                                    vararg: None
+                                },
+                                ret_ty: TypeOrPack::Type(Type::Nil)
+                            })))
                         }],
                         init: vec![Expr::Nil]
                     }),

@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtStatus {
-    // TODO: annotate Some(Stmt) with comments (leading, traling)
     Some(Stmt, Vec<Comment>),
     None,
     PreAllocated,
@@ -294,8 +293,8 @@ pub struct NamedType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionType {
     pub generics: Vec<GenericParam>,
-    pub params: Vec<Type>,
-    pub ret_ty: Box<TypeOrPack>,
+    pub params: TypeList,
+    pub ret_ty: TypeOrPack,
 }
 
 /// Represents a table type
@@ -525,7 +524,7 @@ pub enum Type {
     /// `{ [T] : U }` or `{ x : T }`
     Table(TableType),
     /// `( T ) -> U` or `<T, U...>( T ) -> U`
-    Function(FunctionType),
+    Function(Box<FunctionType>),
     /// `T?`
     Optional(Box<Type>),
     /// `T | U`
