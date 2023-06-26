@@ -1168,9 +1168,13 @@ impl<'s, 'ts> Parser<'s> {
     ) -> Result<TypeOrPack> {
         let kind = node.kind();
         match kind {
-            // ugly, i know
-            "singleton" | "packtype" | "namedtype" | "wraptype" | "dyntype" | "fntype" | "tbtype" | "bintype"
-            | "untype" => Ok(TypeOrPack::Type(self.parse_type(node, unp)?)),
+            // TODO:
+            // ugly, i know, this is temporary, we will match all types, and leave typepack as 
+            // the only one
+            "name" | "generic" | "singleton" | "packtype" | "namedtype"
+            | "wraptype" | "dyntype" | "fntype" | "tbtype" | "bintype" | "untype" => {
+                Ok(TypeOrPack::Type(self.parse_type(node, unp)?))
+            }
             "typepack" => Ok(TypeOrPack::Pack(self.parse_type_pack(node, unp)?)),
             _ => {
                 eprintln!(
