@@ -255,6 +255,7 @@ impl<'s, 'ts> Parser<'s> {
             "var_stmt" => ez_parse!(parse_compop, Stmt::CompOp),
             "ret_stmt" => ez_parse!(parse_return, Stmt::Return),
             "assign_stmt" => ez_parse!(parse_assign, Stmt::Assign),
+            "type_stmt" => ez_parse!(parse_type_def, Stmt::TypeDef),
             // \ these don't need to be parsed separately /
             "break_stmt" => Stmt::Break(Break {}),
             "continue_stmt" => Stmt::Continue(Continue {}),
@@ -921,6 +922,48 @@ impl<'s, 'ts> Parser<'s> {
         Ok(Assign { vars, exprs })
     }
 
+    fn parse_type_def(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<TypeDef> {
+        let cursor = &mut node.walk();
+        let mut is_exported = false;
+        let mut name = String::new();
+        let mut generics = Vec::new(); // TODO
+        let mut ty = None;
+
+        enum State {
+            Init,
+            Type,
+        }
+
+        let mut state = State::Init;
+
+        for child in node.children(cursor) {
+            let kind = child.kind();
+            match (kind, &state) {
+                ("type" | " ", State::Init) => {}
+                ("name", State::Init) => name.push_str(self.extract_text(child)),
+                ("export", State::Init) => is_exported = true,
+                ("=", State::Init) => state = State::Type,
+                ("comment", _) => self.parse_comment_tr(child),
+                (_, State::Type) => ty = Some(self.parse_type(child, unp)?),
+                _ => {
+                    eprintln!("parse_type_def, kind: {}", kind);
+                    return Err(self.error(child));
+                }
+            }
+        }
+
+        Ok(TypeDef {
+            name,
+            ty: ty.ok_or_else(|| self.error(node))?,
+            generics,
+            is_exported,
+        })
+    }
+
     fn parse_binding(
         &mut self,
         node: tree_sitter::Node<'ts>,
@@ -1139,12 +1182,15 @@ impl<'s, 'ts> Parser<'s> {
             }
         }
 
-        let lhs_box = Box::new(lhs.unwrap());
-        let rhs_box = Box::new(rhs.unwrap());
+        let left = lhs.ok_or_else(|| self.error(node))?;
+        let right = rhs.ok_or_else(|| self.error(node))?;
 
-        match ty_kind.unwrap() {
-            TypeKind::Union => Ok(Type::Union(lhs_box, rhs_box)),
-            TypeKind::Intersection => Ok(Type::Intersection(lhs_box, rhs_box)),
+        match ty_kind.ok_or_else(|| self.error(node))? {
+            TypeKind::Union => Ok(Type::Union(Box::new(UnionType { left, right }))),
+            TypeKind::Intersection => Ok(Type::Intersection(Box::new(IntersectionType {
+                left,
+                right,
+            }))),
         }
     }
 
@@ -4975,25 +5021,25 @@ end
                     Stmt::Local(Local {
                         bindings: vec![Binding {
                             name: "x".to_string(),
-                            ty: Some(Type::Union(
-                                Box::new(Type::Union(
-                                    Box::new(Type::Named(NamedType {
+                            ty: Some(Type::Union(Box::new(UnionType {
+                                left: Type::Union(Box::new(UnionType {
+                                    left: Type::Named(NamedType {
                                         table: None,
                                         name: "number".to_string(),
                                         params: vec![]
-                                    })),
-                                    Box::new(Type::Named(NamedType {
+                                    }),
+                                    right: Type::Named(NamedType {
                                         table: None,
                                         name: "string".to_string(),
                                         params: vec![]
-                                    }))
-                                )),
-                                Box::new(Type::Named(NamedType {
+                                    })
+                                })),
+                                right: Type::Named(NamedType {
                                     table: None,
                                     name: "boolean".to_string(),
                                     params: vec![]
-                                }))
-                            ))
+                                })
+                            })))
                         }],
                         init: vec![Expr::Nil]
                     }),
@@ -5013,25 +5059,25 @@ end
                     Stmt::Local(Local {
                         bindings: vec![Binding {
                             name: "x".to_string(),
-                            ty: Some(Type::Intersection(
-                                Box::new(Type::Intersection(
-                                    Box::new(Type::Named(NamedType {
+                            ty: Some(Type::Intersection(Box::new(IntersectionType {
+                                left: Type::Intersection(Box::new(IntersectionType {
+                                    left: Type::Named(NamedType {
                                         table: None,
                                         name: "number".to_string(),
                                         params: vec![]
-                                    })),
-                                    Box::new(Type::Named(NamedType {
+                                    }),
+                                    right: Type::Named(NamedType {
                                         table: None,
                                         name: "string".to_string(),
                                         params: vec![]
-                                    }))
-                                )),
-                                Box::new(Type::Named(NamedType {
+                                    }),
+                                })),
+                                right: Type::Named(NamedType {
                                     table: None,
                                     name: "boolean".to_string(),
                                     params: vec![]
-                                }))
-                            ))
+                                })
+                            })))
                         }],
                         init: vec![Expr::Nil]
                     }),
@@ -5051,25 +5097,25 @@ end
                     Stmt::Local(Local {
                         bindings: vec![Binding {
                             name: "x".to_string(),
-                            ty: Some(Type::Union(
-                                Box::new(Type::Named(NamedType {
+                            ty: Some(Type::Union(Box::new(UnionType {
+                                left: Type::Named(NamedType {
                                     table: None,
                                     name: "number".to_string(),
                                     params: vec![]
-                                })),
-                                Box::new(Type::Intersection(
-                                    Box::new(Type::Named(NamedType {
+                                }),
+                                right: Type::Intersection(Box::new(IntersectionType {
+                                    left: Type::Named(NamedType {
                                         table: None,
                                         name: "string".to_string(),
                                         params: vec![]
-                                    })),
-                                    Box::new(Type::Named(NamedType {
+                                    }),
+                                    right: Type::Named(NamedType {
                                         table: None,
                                         name: "boolean".to_string(),
                                         params: vec![]
-                                    }))
-                                ))
-                            ))
+                                    })
+                                }))
+                            })))
                         }],
                         init: vec![Expr::Nil]
                     }),
@@ -5089,25 +5135,25 @@ end
                     Stmt::Local(Local {
                         bindings: vec![Binding {
                             name: "x".to_string(),
-                            ty: Some(Type::Union(
-                                Box::new(Type::Named(NamedType {
+                            ty: Some(Type::Union(Box::new(UnionType {
+                                left: Type::Named(NamedType {
                                     table: None,
                                     name: "number".to_string(),
                                     params: vec![]
-                                })),
-                                Box::new(Type::Intersection(
-                                    Box::new(Type::Named(NamedType {
+                                }),
+                                right: Type::Intersection(Box::new(IntersectionType {
+                                    left: Type::Named(NamedType {
                                         table: None,
                                         name: "string".to_string(),
                                         params: vec![]
-                                    })),
-                                    Box::new(Type::Optional(Box::new(Type::Named(NamedType {
+                                    }),
+                                    right: Type::Optional(Box::new(Type::Named(NamedType {
                                         table: None,
                                         name: "boolean".to_string(),
                                         params: vec![]
-                                    }))))
-                                ))
-                            ))
+                                    })))
+                                }))
+                            })))
                         }],
                         init: vec![Expr::Nil]
                     }),
@@ -5971,6 +6017,84 @@ end
                             })))
                         }],
                         init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_def_simple() {
+        assert_parse!(
+            "type       MyNil         =         nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::TypeDef(TypeDef {
+                        name: "MyNil".to_string(),
+                        ty: Type::Nil,
+                        generics: vec![],
+                        is_exported: false
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_def_simple_exported() {
+        assert_parse!(
+            "export type MyNil = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::TypeDef(TypeDef {
+                        name: "MyNil".to_string(),
+                        ty: Type::Nil,
+                        generics: vec![],
+                        is_exported: true
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_def_simple_exported_with_complicated_type() {
+        assert_parse!(
+            "export type MyNil = string | (number & boolean) | nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::TypeDef(TypeDef {
+                        name: "MyNil".to_string(),
+                        ty: Type::Union(Box::new(UnionType {
+                            left: Type::Union(Box::new(UnionType {
+                                left: Type::Named(NamedType {
+                                    table: None,
+                                    name: "string".to_string(),
+                                    params: vec![]
+                                }),
+                                right: Type::Wrap(Box::new(Type::Intersection(Box::new(IntersectionType {
+                                    left: Type::Named(NamedType {
+                                        table: None,
+                                        name: "number".to_string(),
+                                        params: vec![]
+                                    }),
+                                    right: Type::Named(NamedType {
+                                        table: None,
+                                        name: "boolean".to_string(),
+                                        params: vec![]
+                                    })
+                                })))),
+                            })),
+                            right: Type::Nil
+                        })),
+                        generics: vec![],
+                        is_exported: true
                     }),
                     vec![]
                 )]

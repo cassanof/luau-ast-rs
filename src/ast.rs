@@ -413,6 +413,32 @@ pub struct TypeList {
     pub vararg: Option<Type>,
 }
 
+/// Represents a type definition
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeDef {
+    pub name: String,
+    pub ty: Type,
+    pub generics: Vec<GenericParam>,
+    pub is_exported: bool,
+}
+
+/// Represents an union type
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnionType {
+    pub left: Type,
+    pub right: Type,
+}
+
+/// Represents an intersection type
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct IntersectionType {
+    pub left: Type,
+    pub right: Type,
+}
+
 /// Represents a statement node in the AST.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -429,7 +455,7 @@ pub enum Stmt {
     LocalFunctionDef(LocalFunctionDef),
     Local(Local),
     Assign(Assign),
-    // TypeDef(TypeDef),
+    TypeDef(TypeDef),
     // \ These under are technically "last statements", but we don't care about that in AST form /
     Return(Return),
     Break(Break),
@@ -528,9 +554,9 @@ pub enum Type {
     /// `T?`
     Optional(Box<Type>),
     /// `T | U`
-    Union(Box<Type>, Box<Type>),
+    Union(Box<UnionType>),
     /// `T & U`
-    Intersection(Box<Type>, Box<Type>),
+    Intersection(Box<IntersectionType>),
     // \ literals (singleton) /
     /// `nil`
     Nil,

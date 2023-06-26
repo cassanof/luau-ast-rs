@@ -2,6 +2,8 @@ use crate::{ast::*, errors::ParseError};
 
 type UnvisitedStmts = Vec<usize>; // where usize is the ptr in the chunk's stmts vec
 
+// TODO: add visitors for types
+
 macro_rules! trait_visitor {
     // ref is a tt if it's &, but it's two tts if it's &mut
     ($($ref:tt)+) => {
@@ -45,6 +47,7 @@ macro_rules! trait_visitor {
         fn visit_table_field(&mut self, _table_field: $($ref)+ TableField) {}
         fn visit_string_interp(&mut self, _string_interp: $($ref)+ StringInterp) {}
         fn visit_type_assertion(&mut self, _type_assertion: $($ref)+ TypeAssertion) {}
+        fn visit_type_def(&mut self, _type_def: $($ref)+ TypeDef) {}
     };
 }
 
@@ -104,6 +107,7 @@ macro_rules! impl_visitor_driver {
                 Stmt::Return(s) => self.drive_return(s, unv),
                 Stmt::Break(s) => self.drive_break(s),
                 Stmt::Continue(s) => self.drive_continue(s),
+                Stmt::TypeDef(s) => self.drive_type_def(s, unv),
             }
         }
 
@@ -359,6 +363,10 @@ macro_rules! impl_visitor_driver {
         fn drive_type_assertion(&mut self, type_assertion: $($ref)+ TypeAssertion, unv: &mut UnvisitedStmts) {
             self.visitor.visit_type_assertion(type_assertion);
             self.drive_expr($($ref)+ type_assertion.expr, unv);
+        }
+
+        fn drive_type_def(&mut self, type_def: $($ref)+ TypeDef, _unv: &mut UnvisitedStmts) {
+            self.visitor.visit_type_def(type_def);
         }
     };
 }
