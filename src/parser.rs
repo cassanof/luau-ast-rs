@@ -317,13 +317,8 @@ impl<'s, 'ts> Parser<'s> {
             let kind = node.kind();
             match (kind, &state) {
                 ("<", State::Generics) => {}
-                ("generic", State::Generics) => {
-                    let txt = self.extract_text(node);
-                    generics.push(GenericParam::Name(txt.to_string()));
-                }
-                ("genpack", State::Generics) => {
-                    let txt = self.extract_text(node.child(0).ok_or_else(|| self.error(node))?);
-                    generics.push(GenericParam::Pack(txt.to_string()));
+                ("generic" | "genpack", State::Generics) => {
+                    generics.push(self.parse_generic_param(node)?);
                 }
                 (">", State::Generics) => state = State::Params,
                 (",", State::Generics | State::Params) => {}
@@ -360,6 +355,21 @@ impl<'s, 'ts> Parser<'s> {
             // there may be no block if the function is empty
             block: block.unwrap_or_default(),
         })
+    }
+
+    fn parse_generic_param(&mut self, node: tree_sitter::Node<'ts>) -> Result<GenericParam> {
+        let kind = node.kind();
+        match kind {
+            "generic" => {
+                let txt = self.extract_text(node);
+                Ok(GenericParam::Name(txt.to_string()))
+            }
+            "genpack" => {
+                let txt = self.extract_text(node.child(0).ok_or_else(|| self.error(node))?);
+                Ok(GenericParam::Pack(txt.to_string()))
+            }
+            _ => Err(self.error(node)),
+        }
     }
 
     fn parse_vararg(
@@ -989,6 +999,7 @@ impl<'s, 'ts> Parser<'s> {
 
         enum State {
             Init,
+            Generics,
             Return,
         }
 
@@ -1000,6 +1011,16 @@ impl<'s, 'ts> Parser<'s> {
                 ("paramlist", State::Init) => {
                     params = self.parse_type_list(child, unp)?;
                     state = State::Return;
+                }
+                ("<", State::Init) => {
+                    state = State::Generics;
+                }
+                ("generic" | "genpack", State::Generics) => {
+                    generics.push(self.parse_generic_param(child)?);
+                }
+                (",", State::Generics) => {}
+                (">", State::Generics) => {
+                    state = State::Init;
                 }
                 (_, State::Return) => {
                     ret_ty = Some(self.parse_type_or_pack(child, unp)?);
@@ -5727,6 +5748,226 @@ end
                                     vararg: None
                                 },
                                 ret_ty: TypeOrPack::Type(Type::Nil)
+                            })))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_function_generics() {
+        assert_parse!(
+            "local x: <T>(T) -> nil = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Function(Box::new(FunctionType {
+                                generics: vec![GenericParam::Name("T".to_string())],
+                                params: TypeList {
+                                    types: vec![Type::Named(NamedType {
+                                        table: None,
+                                        name: "T".to_string(),
+                                        params: vec![]
+                                    })],
+                                    vararg: None
+                                },
+                                ret_ty: TypeOrPack::Type(Type::Nil)
+                            })))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_function_generic_multi_with_pack() {
+        assert_parse!(
+            "local x: <T, U, C...>(T, U, C) -> nil = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Function(Box::new(FunctionType {
+                                generics: vec![
+                                    GenericParam::Name("T".to_string()),
+                                    GenericParam::Name("U".to_string()),
+                                    GenericParam::Pack("C".to_string()),
+                                ],
+                                params: TypeList {
+                                    types: vec![
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "T".to_string(),
+                                            params: vec![]
+                                        }),
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "U".to_string(),
+                                            params: vec![]
+                                        }),
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "C".to_string(),
+                                            params: vec![]
+                                        })
+                                    ],
+                                    vararg: None
+                                },
+                                ret_ty: TypeOrPack::Type(Type::Nil)
+                            })))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_function_generic_multi_with_pack_multi() {
+        assert_parse!(
+            "local x: <T, U..., C...>(T, U, C) -> nil = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Function(Box::new(FunctionType {
+                                generics: vec![
+                                    GenericParam::Name("T".to_string()),
+                                    GenericParam::Pack("U".to_string()),
+                                    GenericParam::Pack("C".to_string()),
+                                ],
+                                params: TypeList {
+                                    types: vec![
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "T".to_string(),
+                                            params: vec![]
+                                        }),
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "U".to_string(),
+                                            params: vec![]
+                                        }),
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "C".to_string(),
+                                            params: vec![]
+                                        })
+                                    ],
+                                    vararg: None
+                                },
+                                ret_ty: TypeOrPack::Type(Type::Nil)
+                            })))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_function_generic_multi_with_pack_multi_varargs() {
+        assert_parse!(
+            "local x: <T, U..., C...>(T, U, ...C) -> nil = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Function(Box::new(FunctionType {
+                                generics: vec![
+                                    GenericParam::Name("T".to_string()),
+                                    GenericParam::Pack("U".to_string()),
+                                    GenericParam::Pack("C".to_string()),
+                                ],
+                                params: TypeList {
+                                    types: vec![
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "T".to_string(),
+                                            params: vec![]
+                                        }),
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "U".to_string(),
+                                            params: vec![]
+                                        }),
+                                    ],
+                                    vararg: Some(Type::Named(NamedType {
+                                        table: None,
+                                        name: "C".to_string(),
+                                        params: vec![]
+                                    }))
+                                },
+                                ret_ty: TypeOrPack::Type(Type::Nil)
+                            })))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_function_generic_multi_with_pack_multi_varargs_packret() {
+        assert_parse!(
+            "local x: <T, U..., C...>(T, U, ...C) -> (nil, ...nil) = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Function(Box::new(FunctionType {
+                                generics: vec![
+                                    GenericParam::Name("T".to_string()),
+                                    GenericParam::Pack("U".to_string()),
+                                    GenericParam::Pack("C".to_string()),
+                                ],
+                                params: TypeList {
+                                    types: vec![
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "T".to_string(),
+                                            params: vec![]
+                                        }),
+                                        Type::Named(NamedType {
+                                            table: None,
+                                            name: "U".to_string(),
+                                            params: vec![]
+                                        }),
+                                    ],
+                                    vararg: Some(Type::Named(NamedType {
+                                        table: None,
+                                        name: "C".to_string(),
+                                        params: vec![]
+                                    }))
+                                },
+                                ret_ty: TypeOrPack::Pack(TypePack::Listed(TypeList {
+                                    types: vec![Type::Nil],
+                                    vararg: Some(Type::Nil)
+                                }))
                             })))
                         }],
                         init: vec![Expr::Nil]
