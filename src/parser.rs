@@ -5634,6 +5634,32 @@ end
     }
 
     #[test]
+    fn test_type_table_array() {
+        assert_parse!(
+            "local x: { number } = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Table(TableType {
+                                props: vec![TableProp::Array(Type::Named(NamedType {
+                                    table: None,
+                                    name: "number".to_string(),
+                                    params: vec![]
+                                }))]
+                            }))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
     fn test_type_function_simple() {
         assert_parse!(
             "local x: (string) -> number = nil",
