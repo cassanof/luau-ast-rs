@@ -1169,7 +1169,7 @@ impl<'s, 'ts> Parser<'s> {
         let kind = node.kind();
         match kind {
             // ugly, i know
-            "packtype" | "namedtype" | "wraptype" | "dyntype" | "fntype" | "tbtype" | "bintype"
+            "singleton" | "packtype" | "namedtype" | "wraptype" | "dyntype" | "fntype" | "tbtype" | "bintype"
             | "untype" => Ok(TypeOrPack::Type(self.parse_type(node, unp)?)),
             "typepack" => Ok(TypeOrPack::Pack(self.parse_type_pack(node, unp)?)),
             _ => {
