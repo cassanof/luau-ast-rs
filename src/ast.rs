@@ -569,6 +569,9 @@ pub enum TableProp {
     Indexer { key: Type, value: Type },
     /// `x : T`
     Prop { key: String, value: Type },
+    /// `T`
+    /// NOTE: when this prop appears, it will be the only prop in the table
+    Array(Type),
 }
 
 /// Represents a generic type parameter.

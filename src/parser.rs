@@ -999,6 +999,13 @@ impl<'s, 'ts> Parser<'s> {
             let kind = child.kind();
             match (kind, &state) {
                 ("{" | "}" | "," | ";", State::Init) => {}
+                ("array", State::Init) => {
+                    props.push(TableProp::Array(self.parse_type(
+                        child.child(0).ok_or_else(|| self.error(child))?,
+                        unp,
+                    )?));
+                    break; // can't allow more props after 1 array
+                }
                 ("name", State::Init) => state = State::PropType(self.extract_text(child)),
                 (":", State::PropType(_) | State::IndexerType(_)) => {}
                 ("[", State::Init) => state = State::IndexerTypeNext,
@@ -5575,6 +5582,32 @@ end
                                         params: vec![]
                                     })),
                                 ]
+                            }))
+                        }],
+                        init: vec![Expr::Nil]
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_regression_table_array() {
+        assert_parse!(
+            "local x: { T } = nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::Local(Local {
+                        bindings: vec![Binding {
+                            name: "x".to_string(),
+                            ty: Some(Type::Table(TableType {
+                                props: vec![TableProp::Array(Type::Named(NamedType {
+                                    table: None,
+                                    name: "T".to_string(),
+                                    params: vec![]
+                                }))]
                             }))
                         }],
                         init: vec![Expr::Nil]
