@@ -6078,18 +6078,20 @@ end
                                     name: "string".to_string(),
                                     params: vec![]
                                 }),
-                                right: Type::Wrap(Box::new(Type::Intersection(Box::new(IntersectionType {
-                                    left: Type::Named(NamedType {
-                                        table: None,
-                                        name: "number".to_string(),
-                                        params: vec![]
-                                    }),
-                                    right: Type::Named(NamedType {
-                                        table: None,
-                                        name: "boolean".to_string(),
-                                        params: vec![]
-                                    })
-                                })))),
+                                right: Type::Wrap(Box::new(Type::Intersection(Box::new(
+                                    IntersectionType {
+                                        left: Type::Named(NamedType {
+                                            table: None,
+                                            name: "number".to_string(),
+                                            params: vec![]
+                                        }),
+                                        right: Type::Named(NamedType {
+                                            table: None,
+                                            name: "boolean".to_string(),
+                                            params: vec![]
+                                        })
+                                    }
+                                )))),
                             })),
                             right: Type::Nil
                         })),
@@ -6101,4 +6103,7 @@ end
             }
         );
     }
+
+    // TODO: test the following
+    // 1. type Iterator<K, V> = ({ [K]: V }, K?) -> (K?, V?)
 }
