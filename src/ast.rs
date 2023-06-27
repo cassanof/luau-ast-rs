@@ -145,6 +145,16 @@ impl Chunk {
     pub fn set_stmt(&mut self, index: usize, stmt_status: StmtStatus) {
         self.stmts[index] = stmt_status;
     }
+
+    /// Produces a new `Chunk` from the given `Block`. It collects all the statements in the block
+    /// and puts them in the new chunk. This may semantically leak memory, as dangling statements
+    /// will not be deallocated.
+    pub fn slice_from_block(self, block: Block) -> Self {
+        Chunk {
+            block,
+            stmts: self.stmts,
+        }
+    }
 }
 
 /// A block represents a list of statement. The statements here are pointers to the statements
