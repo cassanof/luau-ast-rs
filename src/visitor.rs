@@ -1,6 +1,8 @@
+use std::collections::VecDeque;
+
 use crate::{ast::*, errors::ParseError};
 
-type UnvisitedStmts = Vec<usize>; // where usize is the ptr in the chunk's stmts vec
+type UnvisitedStmts = VecDeque<usize>; // where usize is the ptr in the chunk's stmts vec
 
 // TODO: add visitors for types
 
@@ -56,10 +58,16 @@ macro_rules! impl_visitor_driver {
     ($($ref:tt)+) => {
         /// Creates a new visitor driver.
         pub fn new(visitor: &'a mut V) -> Self {
-            Self { visitor }
+            Self { visitor, curr_stmt: 0 }
         }
 
-        /// Runs the visitor over the chunk, visiting all statements in the chunk.
+        /// Retrieves the pointer to the current statement that is being visited.
+        pub fn curr_stmt(&self) -> usize {
+            self.curr_stmt
+        }
+
+        /// Runs the visitor over the chunk, visiting all statements in the chunk. The visitor
+        /// will visit all statements and expressions in DFS order.
         ///
         /// # Panics
         /// - If the statement arena in the chunk is malformed and some statement pointer is out of
@@ -68,11 +76,11 @@ macro_rules! impl_visitor_driver {
         pub fn drive(&mut self, chunk: $($ref)+ Chunk) {
             self.visitor.visit_chunk(chunk);
 
-            let mut unvisited_stmts = Vec::new();
-            self.drive_block($($ref)+ chunk.block, &mut unvisited_stmts);
+            let mut unvisited_stmts = VecDeque::new();
 
-            while let Some(stmt_ptr) = unvisited_stmts.pop() {
+            while let Some(stmt_ptr) = unvisited_stmts.pop_back() {
                 let stmt_status = $($ref)+ chunk.stmts[stmt_ptr];
+                self.curr_stmt = stmt_ptr;
                 match stmt_status {
                     StmtStatus::Some(s, c) => self.drive_stmt(s, c, &mut unvisited_stmts),
                     StmtStatus::None => {} // was removed, nothing to do
@@ -85,7 +93,7 @@ macro_rules! impl_visitor_driver {
         fn drive_block(&mut self, block: $($ref)+ Block, unv: &mut UnvisitedStmts) {
             self.visitor.visit_block(block);
             for stmt_ptr in block.stmt_ptrs.iter() {
-                unv.push(*stmt_ptr);
+                unv.push_back(*stmt_ptr);
             }
         }
 
@@ -381,10 +389,12 @@ pub trait VisitorMut {
 
 pub struct VisitorDriver<'a, V: Visitor> {
     visitor: &'a mut V,
+    curr_stmt: usize,
 }
 
 pub struct VisitorMutDriver<'a, V: VisitorMut> {
     visitor: &'a mut V,
+    curr_stmt: usize,
 }
 
 impl<'a, V: Visitor> VisitorDriver<'a, V> {
