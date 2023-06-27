@@ -1011,9 +1011,7 @@ impl<'s, 'ts> Parser<'s> {
             "dyntype" => Ok(Type::TypeOf(
                 self.parse_expr(node.child(2).ok_or_else(|| self.error(node))?, unp)?,
             )),
-            "wraptype" => Ok(Type::Wrap(Box::new(
-                self.parse_type(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
-            ))),
+            "wraptype" => Ok(self.parse_type(node.child(1).ok_or_else(|| self.error(node))?, unp)?),
             "untype" => Ok(Type::Optional(Box::new(
                 self.parse_type(node.child(0).ok_or_else(|| self.error(node))?, unp)?,
             ))),
@@ -1377,9 +1375,9 @@ impl<'s, 'ts> Parser<'s> {
                     unp,
                 )?))),
                 "vararg" => Ok(Expr::VarArg),
-                "exp_wrap" => Ok(Expr::Wrap(Box::new(
-                    self.parse_expr(node.child(1).ok_or_else(|| self.error(node))?, unp)?,
-                ))),
+                "exp_wrap" => {
+                    Ok(self.parse_expr(node.child(1).ok_or_else(|| self.error(node))?, unp)?)
+                }
                 "var" => Ok(Expr::Var(self.parse_var(node, unp)?)),
                 "binexp" => Ok(Expr::BinOp(Box::new(self.parse_binop(node, unp)?))),
                 "unexp" => Ok(Expr::UnOp(Box::new(self.parse_unop(node, unp)?))),
@@ -2925,7 +2923,7 @@ mod tests {
                             }],
                             init: vec![Expr::UnOp(Box::new(UnOp {
                                 op: UnOpKind::Neg,
-                                expr: Expr::Wrap(Box::new(Expr::Number(1.0)))
+                                expr: Expr::Number(1.0)
                             })),]
                         }),
                         vec![]
@@ -3052,19 +3050,19 @@ mod tests {
                             ty: None
                         }],
                         init: vec![Expr::BinOp(Box::new(BinOp {
-                            lhs: Expr::Wrap(Box::new(Expr::BinOp(Box::new(BinOp {
+                            lhs: Expr::BinOp(Box::new(BinOp {
                                 lhs: Expr::BinOp(Box::new(BinOp {
                                     lhs: Expr::Number(1.0),
                                     op: BinOpKind::Add,
-                                    rhs: Expr::Wrap(Box::new(Expr::BinOp(Box::new(BinOp {
+                                    rhs: Expr::BinOp(Box::new(BinOp {
                                         lhs: Expr::Number(2.0),
                                         op: BinOpKind::Mul,
                                         rhs: Expr::Number(3.0)
-                                    })))),
+                                    })),
                                 })),
                                 op: BinOpKind::Sub,
-                                rhs: Expr::Wrap(Box::new(Expr::Number(1.0)))
-                            })))),
+                                rhs: Expr::Number(1.0)
+                            })),
                             op: BinOpKind::Div,
                             rhs: Expr::Number(4.0)
                         })),]
@@ -3897,11 +3895,11 @@ mod tests {
                         }],
                         init: vec![Expr::Call(Box::new(Call {
                             func: Expr::Call(Box::new(Call {
-                                func: Expr::Wrap(Box::new(Expr::Call(Box::new(Call {
+                                func: Expr::Call(Box::new(Call {
                                     func: Expr::Var(Var::Name("f".to_string())),
                                     args: CallArgs::Exprs(vec![]),
                                     method: None
-                                })))),
+                                })),
                                 args: CallArgs::Exprs(vec![]),
                                 method: None
                             })),
@@ -4034,7 +4032,7 @@ mod tests {
                             ty: None
                         }],
                         init: vec![Expr::Var(Var::TableAccess(Box::new(TableAccess {
-                            expr: Expr::Wrap(Box::new(Expr::Number(1.0))),
+                            expr: Expr::Number(1.0),
                             index: Expr::Number(1.0)
                         })))]
                     }),
@@ -4080,7 +4078,7 @@ mod tests {
                             ty: None
                         }],
                         init: vec![Expr::Var(Var::FieldAccess(Box::new(FieldAccess {
-                            expr: Expr::Wrap(Box::new(Expr::Number(1.0))),
+                            expr: Expr::Number(1.0),
                             field: "x".to_string()
                         })))]
                     }),
@@ -4947,11 +4945,11 @@ end
                     Stmt::Local(Local {
                         bindings: vec![Binding {
                             name: "x".to_string(),
-                            ty: Some(Type::Wrap(Box::new(Type::Named(NamedType {
+                            ty: Some(Type::Named(NamedType {
                                 table: None,
                                 name: "number".to_string(),
                                 params: vec![]
-                            }))))
+                            }))
                         }],
                         init: vec![Expr::Nil]
                     }),
@@ -6078,20 +6076,18 @@ end
                                     name: "string".to_string(),
                                     params: vec![]
                                 }),
-                                right: Type::Wrap(Box::new(Type::Intersection(Box::new(
-                                    IntersectionType {
-                                        left: Type::Named(NamedType {
-                                            table: None,
-                                            name: "number".to_string(),
-                                            params: vec![]
-                                        }),
-                                        right: Type::Named(NamedType {
-                                            table: None,
-                                            name: "boolean".to_string(),
-                                            params: vec![]
-                                        })
-                                    }
-                                )))),
+                                right: Type::Intersection(Box::new(IntersectionType {
+                                    left: Type::Named(NamedType {
+                                        table: None,
+                                        name: "number".to_string(),
+                                        params: vec![]
+                                    }),
+                                    right: Type::Named(NamedType {
+                                        table: None,
+                                        name: "boolean".to_string(),
+                                        params: vec![]
+                                    })
+                                })),
                             })),
                             right: Type::Nil
                         })),

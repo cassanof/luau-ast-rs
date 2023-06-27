@@ -37,7 +37,6 @@ macro_rules! trait_visitor {
         fn visit_break(&mut self, _state: &VisitorDriverState, _break: $($ref)+ Break) {}
         fn visit_continue(&mut self, _state: &VisitorDriverState,  _continue: $($ref)+ Continue) {}
         fn visit_expr(&mut self, _state: &VisitorDriverState, _expr: $($ref)+ Expr) {}
-        fn visit_wrap(&mut self, _state: &VisitorDriverState, _wrap: $($ref)+ Expr) {}
         fn visit_number(&mut self, _state: &VisitorDriverState, _number: $($ref)+ f64) {}
         fn visit_string(&mut self, _state: &VisitorDriverState, _string: $($ref)+ str) {}
         fn visit_nil(&mut self, _state: &VisitorDriverState) {}
@@ -129,7 +128,6 @@ macro_rules! impl_visitor_driver {
                     Expr::Bool(b) => self.visitor.visit_bool(&self.state, b),
                     Expr::VarArg => self.visitor.visit_vararg(&self.state),
                     Expr::Var(v) => self.drive_var(v, unv),
-                    Expr::Wrap(e) => self.drive_wrap(e, unv),
                     Expr::Call(c) => self.drive_call(c, unv),
                     Expr::TableConstructor(t) => self.drive_table_constructor(t, unv),
                     Expr::Function(f) => self.drive_function_expr(f, unv),
@@ -301,11 +299,6 @@ macro_rules! impl_visitor_driver {
         fn drive_binding(&mut self, binding: $($ref)+ Binding) {
             self.visitor.visit_binding(&self.state,binding);
             // TODO: type traversal
-        }
-
-        fn drive_wrap(&mut self, wrap: $($ref)+ Expr, unv: &mut UnvisitedStmts) {
-            self.visitor.visit_wrap(&self.state,wrap);
-            self.drive_expr(wrap, unv);
         }
 
         fn drive_table_constructor(

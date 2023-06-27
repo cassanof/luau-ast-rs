@@ -483,7 +483,6 @@ pub enum Expr {
     Bool(bool),
     VarArg,
     Var(Var),
-    Wrap(Box<Expr>),
     // NOTE: boxed because Call uses Expr
     Call(Box<Call>),
     TableConstructor(TableConstructor),
@@ -551,8 +550,6 @@ pub enum Type {
     /// This can typically only occur at the last parameter of a function.
     Pack(Box<Type>),
     // \ simple types /
-    /// `( T )`
-    Wrap(Box<Type>),
     /// `typeof(exp)`
     TypeOf(Expr),
     /// `T` or `T<PARAM1, PARAM2>` or `tbl.T`
