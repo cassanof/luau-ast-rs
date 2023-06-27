@@ -1,8 +1,11 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::{ast::*, errors::ParseError};
 
-type UnvisitedStmts = VecDeque<usize>; // where usize is the ptr in the chunk's stmts vec
+type UnvisitedStmts = VecDeque<(
+    usize, // parent stmt ptr
+    usize, // unvisited stmt ptr
+)>;
 
 // TODO: add visitors for types
 
@@ -58,12 +61,18 @@ macro_rules! impl_visitor_driver {
     ($($ref:tt)+) => {
         /// Creates a new visitor driver.
         pub fn new(visitor: &'a mut V) -> Self {
-            Self { visitor, curr_stmt: 0 }
+            Self { visitor, state: VisitorDriverState::default()}
         }
 
         /// Retrieves the pointer to the current statement that is being visited.
         pub fn curr_stmt(&self) -> usize {
-            self.curr_stmt
+            self.state.curr_stmt
+        }
+
+        /// Retrieves the parent index of the given statement pointer. If the given index is the
+        /// root statement, then `None` is returned.
+        pub fn parent_stmt(&self, stmt_ptr: usize) -> Option<usize> {
+            self.state.from_map.get(&stmt_ptr).copied()
         }
 
         /// Runs the visitor over the chunk, visiting all statements in the chunk. The visitor
@@ -78,9 +87,10 @@ macro_rules! impl_visitor_driver {
 
             let mut unvisited_stmts = VecDeque::new();
 
-            while let Some(stmt_ptr) = unvisited_stmts.pop_back() {
+            while let Some((parent_stmt_ptr, stmt_ptr)) = unvisited_stmts.pop_back() {
                 let stmt_status = $($ref)+ chunk.stmts[stmt_ptr];
-                self.curr_stmt = stmt_ptr;
+                self.state.from_map.insert(stmt_ptr, parent_stmt_ptr);
+                self.state.curr_stmt = stmt_ptr;
                 match stmt_status {
                     StmtStatus::Some(s, c) => self.drive_stmt(s, c, &mut unvisited_stmts),
                     StmtStatus::None => {} // was removed, nothing to do
@@ -92,8 +102,9 @@ macro_rules! impl_visitor_driver {
 
         fn drive_block(&mut self, block: $($ref)+ Block, unv: &mut UnvisitedStmts) {
             self.visitor.visit_block(block);
+            let parent_ptr = self.state.curr_stmt;
             for stmt_ptr in block.stmt_ptrs.iter() {
-                unv.push_back(*stmt_ptr);
+                unv.push_back((parent_ptr, *stmt_ptr));
             }
         }
 
@@ -387,14 +398,22 @@ pub trait VisitorMut {
     trait_visitor!(&mut);
 }
 
+#[derive(Default)]
+pub struct VisitorDriverState {
+    curr_stmt: usize,
+    /// map that maps stmt index to their parent stmt index. the root stmt isn't stored as
+    /// a key in this map.
+    from_map: HashMap<usize, usize>,
+}
+
 pub struct VisitorDriver<'a, V: Visitor> {
     visitor: &'a mut V,
-    curr_stmt: usize,
+    state: VisitorDriverState,
 }
 
 pub struct VisitorMutDriver<'a, V: VisitorMut> {
     visitor: &'a mut V,
-    curr_stmt: usize,
+    state: VisitorDriverState,
 }
 
 impl<'a, V: Visitor> VisitorDriver<'a, V> {
