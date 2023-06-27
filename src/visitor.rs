@@ -74,6 +74,7 @@ macro_rules! impl_visitor_driver {
             self.visitor.visit_chunk(&self.state, chunk);
 
             let mut unvisited_stmts = VecDeque::new();
+            self.drive_block($($ref)+ chunk.block, &mut unvisited_stmts);
 
             while let Some((parent_stmt_ptr, stmt_ptr)) = unvisited_stmts.pop_back() {
                 let stmt_status = $($ref)+ chunk.stmts[stmt_ptr];
