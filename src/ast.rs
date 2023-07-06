@@ -429,7 +429,7 @@ pub struct TypeList {
 pub struct TypeDef {
     pub name: String,
     pub ty: Type,
-    pub generics: Vec<GenericParam>,
+    pub generics: Vec<GenericDef>,
     pub is_exported: bool,
 }
 
@@ -447,6 +447,14 @@ pub struct UnionType {
 pub struct IntersectionType {
     pub left: Type,
     pub right: Type,
+}
+
+/// Represents a generic definition. Used in type definitions.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenericDef {
+    pub param: GenericParam,
+    pub default: Option<TypeOrPack>,
 }
 
 /// Represents a statement node in the AST.

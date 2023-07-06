@@ -373,6 +373,35 @@ impl<'s, 'ts> Parser<'s> {
         }
     }
 
+    fn parse_generic_def(
+        &mut self,
+        node: tree_sitter::Node<'ts>,
+        unp: &mut UnparsedStmts<'ts>,
+    ) -> Result<GenericDef> {
+        let mut cursor = node.walk();
+        let mut param = None;
+        let mut default = None;
+        let mut default_next = false;
+        for child in node.children(&mut cursor) {
+            let kind = child.kind();
+            match kind {
+                "generic" | "genpack" => {
+                    param = Some(self.parse_generic_param(child)?);
+                }
+                "=" => default_next = true,
+                _ if default_next => {
+                    default = Some(self.parse_type_or_pack(child, unp)?);
+                    break;
+                }
+                _ => return Err(self.error(child)),
+            }
+        }
+        Ok(GenericDef {
+            param: param.ok_or_else(|| self.error(node))?,
+            default,
+        })
+    }
+
     fn parse_vararg(
         &mut self,
         node: tree_sitter::Node<'ts>,
@@ -930,11 +959,12 @@ impl<'s, 'ts> Parser<'s> {
         let cursor = &mut node.walk();
         let mut is_exported = false;
         let mut name = String::new();
-        let mut generics = Vec::new(); // TODO
+        let mut generics = Vec::new();
         let mut ty = None;
 
         enum State {
             Init,
+            Generics,
             Type,
         }
 
@@ -947,6 +977,12 @@ impl<'s, 'ts> Parser<'s> {
                 ("name", State::Init) => name.push_str(self.extract_text(child)),
                 ("export", State::Init) => is_exported = true,
                 ("=", State::Init) => state = State::Type,
+                ("<", State::Init) => state = State::Generics,
+                (",", State::Generics) => {}
+                ("genericdef" | "genpackdef", State::Generics) => {
+                    generics.push(self.parse_generic_def(child, unp)?)
+                }
+                (">", State::Generics) => state = State::Init,
                 ("comment", _) => self.parse_comment_tr(child),
                 (_, State::Type) => ty = Some(self.parse_type(child, unp)?),
                 _ => {
@@ -6092,6 +6128,98 @@ end
                             right: Type::Nil
                         })),
                         generics: vec![],
+                        is_exported: true
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_def_generics_simple() {
+        assert_parse!(
+            "export type MyNil<T> = T | (number & boolean) | nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::TypeDef(TypeDef {
+                        name: "MyNil".to_string(),
+                        ty: Type::Union(Box::new(UnionType {
+                            left: Type::Union(Box::new(UnionType {
+                                left: Type::Named(NamedType {
+                                    table: None,
+                                    name: "T".to_string(),
+                                    params: vec![]
+                                }),
+                                right: Type::Intersection(Box::new(IntersectionType {
+                                    left: Type::Named(NamedType {
+                                        table: None,
+                                        name: "number".to_string(),
+                                        params: vec![]
+                                    }),
+                                    right: Type::Named(NamedType {
+                                        table: None,
+                                        name: "boolean".to_string(),
+                                        params: vec![]
+                                    })
+                                })),
+                            })),
+                            right: Type::Nil
+                        })),
+                        generics: vec![GenericDef {
+                            param: GenericParam::Name("T".to_string()),
+                            default: None,
+                        }],
+                        is_exported: true
+                    }),
+                    vec![]
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn test_type_def_generics_two_simple() {
+        assert_parse!(
+            "export type MyNil<T, U> = T | (U & boolean) | nil",
+            Chunk {
+                block: Block { stmt_ptrs: vec![0] },
+                stmts: vec![StmtStatus::Some(
+                    Stmt::TypeDef(TypeDef {
+                        name: "MyNil".to_string(),
+                        ty: Type::Union(Box::new(UnionType {
+                            left: Type::Union(Box::new(UnionType {
+                                left: Type::Named(NamedType {
+                                    table: None,
+                                    name: "T".to_string(),
+                                    params: vec![]
+                                }),
+                                right: Type::Intersection(Box::new(IntersectionType {
+                                    left: Type::Named(NamedType {
+                                        table: None,
+                                        name: "U".to_string(),
+                                        params: vec![]
+                                    }),
+                                    right: Type::Named(NamedType {
+                                        table: None,
+                                        name: "boolean".to_string(),
+                                        params: vec![]
+                                    })
+                                })),
+                            })),
+                            right: Type::Nil
+                        })),
+                        generics: vec![
+                            GenericDef {
+                                param: GenericParam::Name("T".to_string()),
+                                default: None,
+                            },
+                            GenericDef {
+                                param: GenericParam::Name("U".to_string()),
+                                default: None,
+                            }
+                        ],
                         is_exported: true
                     }),
                     vec![]
