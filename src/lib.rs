@@ -3,6 +3,8 @@ use lazy_static::lazy_static;
 pub mod ast;
 pub mod errors;
 pub mod parser;
+#[cfg(test)]
+mod parser_tests;
 pub mod visitor;
 
 lazy_static! {
