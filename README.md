@@ -30,7 +30,7 @@ All the files are processed in only a few minutes, which shows how fast this par
 
 ### Current Status
 
-- AST [Lua5.1 is complete, Luau is still WIP]
-- Parser [Lua5.1 is complete, Luau is still WIP]
+- AST [COMPLETE]
+- Parser [COMPLETE]
 - AST Traversal through visitors [Lua5.1 is complete, Luau is still WIP]
 - Pretty-printing [NOT STARTED]
