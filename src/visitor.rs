@@ -1,4 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    marker::PhantomData,
+};
 
 use crate::{ast::*, errors::ParseError};
 
@@ -10,8 +13,8 @@ type UnvisitedStmts = VecDeque<(
 // TODO: add visitors for types
 macro_rules! trait_visitor {
     // ref is a tt if it's &, but it's two tts if it's &mut
-    ($($ref:tt)+) => {
-        fn visit_chunk(&mut self, _state: &VisitorDriverState, _chunk: $($ref)+ Chunk) {}
+    ($chunk_gen:ident, $($ref:tt)+) => {
+        fn visit_chunk(&mut self, _state: &VisitorDriverState, _chunk: $($ref)+ $chunk_gen) {}
         fn visit_block(&mut self, _state: &VisitorDriverState, _block: $($ref)+ Block) {}
         fn visit_parse_error(&mut self, _state: &VisitorDriverState, _error: $($ref)+ ParseError) {}
         fn visit_stmt(&mut self, _state: &VisitorDriverState, _stmt: $($ref)+ Stmt, _coms: $($ref)+ [Comment]) {}
@@ -57,37 +60,6 @@ macro_rules! trait_visitor {
 macro_rules! impl_visitor_driver {
     // ref is a tt if it's &, but it's two tts if it's &mut
     ($($ref:tt)+) => {
-        /// Creates a new visitor driver.
-        pub fn new(visitor: &'a mut V) -> Self {
-            Self { visitor, state: VisitorDriverState::default()}
-        }
-
-        /// Runs the visitor over the chunk, visiting all statements in the chunk. The visitor
-        /// will visit all statements and expressions in DFS order.
-        ///
-        /// # Panics
-        /// - If the statement arena in the chunk is malformed and some statement pointer is out of
-        /// bounds.
-        /// - If a statement is marked as `StmtStatus::PreAllocated`.
-        pub fn drive(&mut self, chunk: $($ref)+ Chunk) {
-            self.visitor.visit_chunk(&self.state, chunk);
-
-            let mut unvisited_stmts = VecDeque::new();
-            self.drive_block($($ref)+ chunk.block, &mut unvisited_stmts);
-
-            while let Some((parent_stmt_ptr, stmt_ptr)) = unvisited_stmts.pop_back() {
-                let stmt_status = $($ref)+ chunk.stmts[stmt_ptr];
-                self.state.from_map.insert(stmt_ptr, parent_stmt_ptr);
-                self.state.curr_stmt = stmt_ptr;
-                match stmt_status {
-                    StmtStatus::Some(s, c) => self.drive_stmt(s, c, &mut unvisited_stmts),
-                    StmtStatus::None => {} // was removed, nothing to do
-                    StmtStatus::PreAllocated => panic!("PreAllocated stmts should not be visited"),
-                    StmtStatus::Error(p) => self.visitor.visit_parse_error(&self.state, p),
-                }
-            }
-        }
-
         fn drive_block(&mut self, block: $($ref)+ Block, unv: &mut UnvisitedStmts) {
             self.visitor.visit_block(&self.state, block);
             let parent_ptr = self.state.curr_stmt;
@@ -385,12 +357,12 @@ impl VisitorDriverState {
     }
 }
 
-pub trait Visitor {
-    trait_visitor!(&);
+pub trait Visitor<C: ChunkRef> {
+    trait_visitor!(C, &);
 }
 
 pub trait VisitorMut {
-    trait_visitor!(&mut);
+    trait_visitor!(Chunk, &mut);
 }
 
 #[derive(Default)]
@@ -401,9 +373,10 @@ pub struct VisitorDriverState {
     from_map: HashMap<usize, usize>,
 }
 
-pub struct VisitorDriver<'a, V: Visitor> {
+pub struct VisitorDriver<'a, C: ChunkRef, V: Visitor<C>> {
     visitor: &'a mut V,
     state: VisitorDriverState,
+    _phantom: PhantomData<C>,
 }
 
 pub struct VisitorMutDriver<'a, V: VisitorMut> {
@@ -411,10 +384,79 @@ pub struct VisitorMutDriver<'a, V: VisitorMut> {
     state: VisitorDriverState,
 }
 
-impl<'a, V: Visitor> VisitorDriver<'a, V> {
+impl<'a, C: ChunkRef, V: Visitor<C>> VisitorDriver<'a, C, V> {
+    /// Creates a new visitor driver.
+    pub fn new(visitor: &'a mut V) -> Self {
+        Self {
+            visitor,
+            state: VisitorDriverState::default(),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Runs the visitor over the chunk, visiting all statements in the chunk. The visitor
+    /// will visit all statements and expressions in DFS order.
+    ///
+    /// # Panics
+    /// - If the statement arena in the chunk is malformed and some statement pointer is out of
+    /// bounds.
+    /// - If a statement is marked as `StmtStatus::PreAllocated`.
+    pub fn drive(&mut self, chunk: C) {
+        self.visitor.visit_chunk(&self.state, &chunk);
+
+        let mut unvisited_stmts = VecDeque::new();
+        self.drive_block(chunk.block(), &mut unvisited_stmts);
+
+        while let Some((parent_stmt_ptr, stmt_ptr)) = unvisited_stmts.pop_back() {
+            let stmt_status = chunk.get_stmt(stmt_ptr);
+            self.state.from_map.insert(stmt_ptr, parent_stmt_ptr);
+            self.state.curr_stmt = stmt_ptr;
+            match stmt_status {
+                StmtStatus::Some(s, c) => self.drive_stmt(s, c, &mut unvisited_stmts),
+                StmtStatus::None => {} // was removed, nothing to do
+                StmtStatus::PreAllocated => panic!("PreAllocated stmts should not be visited"),
+                StmtStatus::Error(p) => self.visitor.visit_parse_error(&self.state, p),
+            }
+        }
+    }
+
     impl_visitor_driver!(&);
 }
 
 impl<'a, V: VisitorMut> VisitorMutDriver<'a, V> {
+    /// Creates a new visitor driver.
+    pub fn new(visitor: &'a mut V) -> Self {
+        Self {
+            visitor,
+            state: VisitorDriverState::default(),
+        }
+    }
+
+    /// Runs the visitor over the chunk, visiting all statements in the chunk. The visitor
+    /// will visit all statements and expressions in DFS order.
+    ///
+    /// # Panics
+    /// - If the statement arena in the chunk is malformed and some statement pointer is out of
+    /// bounds.
+    /// - If a statement is marked as `StmtStatus::PreAllocated`.
+    pub fn drive(&mut self, chunk: &mut Chunk) {
+        self.visitor.visit_chunk(&self.state, chunk);
+
+        let mut unvisited_stmts = VecDeque::new();
+        self.drive_block(&mut chunk.block, &mut unvisited_stmts);
+
+        while let Some((parent_stmt_ptr, stmt_ptr)) = unvisited_stmts.pop_back() {
+            let stmt_status = &mut chunk.stmts[stmt_ptr];
+            self.state.from_map.insert(stmt_ptr, parent_stmt_ptr);
+            self.state.curr_stmt = stmt_ptr;
+            match stmt_status {
+                StmtStatus::Some(s, c) => self.drive_stmt(s, c, &mut unvisited_stmts),
+                StmtStatus::None => {} // was removed, nothing to do
+                StmtStatus::PreAllocated => panic!("PreAllocated stmts should not be visited"),
+                StmtStatus::Error(p) => self.visitor.visit_parse_error(&self.state, p),
+            }
+        }
+    }
+
     impl_visitor_driver!(&mut);
 }

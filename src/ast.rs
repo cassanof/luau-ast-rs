@@ -39,7 +39,7 @@ pub enum Comment {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Chunk {
-    pub block: Block,
+    pub(crate) block: Block,
     // TODO: benchmark different data structures for this arena
     /// This vector contains all the statements in the AST. These are referenced
     /// by index as if they were pointers in a linked list. It is an option
@@ -56,6 +56,55 @@ impl Iterator for Chunk {
     }
 }
 
+pub trait ChunkInfo {
+    /// Returns the number of statements in the chunk.
+    fn len(&self) -> usize;
+
+    /// Returns true if the chunk is empty, has no statements.
+    #[must_use]
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+pub trait ChunkRetrievable {
+    /// Returns the statement at the given index.
+    ///
+    /// # Panics
+    /// Panics if the index is out of bounds.
+    fn get_stmt(&self, index: usize) -> &StmtStatus;
+
+    /// Returns the main block of the chunk.
+    fn block(&self) -> &Block;
+
+    /// Produces a new `ChunkSlice` from the given `Block`.
+    fn slice_from_block(&self, block: Block) -> ChunkSlice<'_>;
+}
+
+pub trait ChunkRef: ChunkInfo + ChunkRetrievable {}
+
+impl ChunkInfo for Chunk {
+    fn len(&self) -> usize {
+        self.stmts.len()
+    }
+}
+
+impl ChunkRetrievable for Chunk {
+    fn get_stmt(&self, index: usize) -> &StmtStatus {
+        &self.stmts[index]
+    }
+
+    fn block(&self) -> &Block {
+        &self.block
+    }
+
+    fn slice_from_block(&self, block: Block) -> ChunkSlice<'_> {
+        ChunkSlice { chunk: self, block }
+    }
+}
+
+impl ChunkRef for Chunk {}
+
 impl Chunk {
     /// Allocates and adds a statement to the chunk.
     pub fn add_stmt(&mut self, stmt_status: StmtStatus) -> usize {
@@ -71,25 +120,6 @@ impl Chunk {
     /// Panics if the index is out of bounds.
     pub fn remove_stmt(&mut self, index: usize) {
         self.set_stmt(index, StmtStatus::None);
-    }
-
-    /// Returns the statement at the given index.
-    ///
-    /// # Panics
-    /// Panics if the index is out of bounds.
-    pub fn get_stmt(&self, index: usize) -> &StmtStatus {
-        &self.stmts[index]
-    }
-
-    /// Returns the number of statements in the chunk.
-    pub fn len(&self) -> usize {
-        self.stmts.len()
-    }
-
-    /// Returns true if the chunk is empty, has no statements.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     /// Adds a comment to the statement at the given index.
@@ -145,17 +175,40 @@ impl Chunk {
     pub fn set_stmt(&mut self, index: usize, stmt_status: StmtStatus) {
         self.stmts[index] = stmt_status;
     }
+}
 
-    /// Produces a new `Chunk` from the given `Block`. It collects all the statements in the block
-    /// and puts them in the new chunk. This may semantically leak memory, as dangling statements
-    /// will not be deallocated.
-    pub fn slice_from_block(self, block: Block) -> Self {
-        Chunk {
+/// A slice of a chunk, used to traverse subsets of the AST.
+/// TODO: mutable version of this
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkSlice<'a> {
+    chunk: &'a Chunk,
+    block: Block,
+}
+
+impl<'a> ChunkRetrievable for ChunkSlice<'a> {
+    fn get_stmt(&self, index: usize) -> &StmtStatus {
+        self.chunk.get_stmt(index)
+    }
+
+    fn block(&self) -> &Block {
+        &self.block
+    }
+
+    fn slice_from_block(&self, block: Block) -> ChunkSlice<'_> {
+        ChunkSlice {
+            chunk: self.chunk,
             block,
-            stmts: self.stmts,
         }
     }
 }
+
+impl ChunkInfo for ChunkSlice<'_> {
+    fn len(&self) -> usize {
+        self.block.stmt_ptrs.len()
+    }
+}
+
+impl<'a> ChunkRef for ChunkSlice<'a> {}
 
 /// A block represents a list of statement. The statements here are pointers to the statements
 /// that live in the chunk.
