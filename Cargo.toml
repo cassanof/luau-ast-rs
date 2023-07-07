@@ -1,6 +1,6 @@
 [package]
 name = "luau-ast-rs"
-version = "0.1.25"
+version = "0.1.26"
 edition = "2021"
 license = "MIT"
 keywords = ["lua",  "luau",  "roblox",  "ast", "parser"]
