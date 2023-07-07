@@ -83,13 +83,13 @@ pub trait ChunkRetrievable {
 
 pub trait ChunkRef: ChunkInfo + ChunkRetrievable {}
 
-impl ChunkInfo for Chunk {
+impl ChunkInfo for &Chunk {
     fn len(&self) -> usize {
         self.stmts.len()
     }
 }
 
-impl ChunkRetrievable for Chunk {
+impl ChunkRetrievable for &Chunk {
     fn get_stmt(&self, index: usize) -> &StmtStatus {
         &self.stmts[index]
     }
@@ -103,7 +103,7 @@ impl ChunkRetrievable for Chunk {
     }
 }
 
-impl ChunkRef for Chunk {}
+impl ChunkRef for &Chunk {}
 
 impl Chunk {
     /// Allocates and adds a statement to the chunk.
