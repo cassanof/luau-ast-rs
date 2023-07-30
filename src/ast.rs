@@ -351,6 +351,14 @@ pub struct NamedType {
     pub params: Vec<TypeOrPack>,
 }
 
+/// Represents a bound type.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundType {
+    pub name: String,
+    pub ty: Box<Type>,
+}
+
 /// Represents a function type
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -615,6 +623,9 @@ pub enum Type {
     TypeOf(Expr),
     /// `T` or `T<PARAM1, PARAM2>` or `tbl.T`
     Named(NamedType),
+    /// `id : T`
+    /// This is used in function type parameters.
+    Bound(BoundType),
     /// `{ [T] : U }` or `{ x : T }`
     Table(TableType),
     /// `( T ) -> U` or `<T, U...>( T ) -> U`

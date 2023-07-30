@@ -3921,6 +3921,152 @@ fn test_type_function_simple() {
 }
 
 #[test]
+fn test_type_function_bound_param() {
+    assert_parse!(
+        "local x: (a: string) -> number = nil",
+        Chunk {
+            block: Block { stmt_ptrs: vec![0] },
+            stmts: vec![StmtStatus::Some(
+                Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "x".to_string(),
+                        ty: Some(Type::Function(Box::new(FunctionType {
+                            generics: vec![],
+                            params: TypeList {
+                                types: vec![Type::Bound(BoundType {
+                                    name: "a".to_string(),
+                                    ty: Box::new(Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    }))
+                                })],
+                                vararg: None
+                            },
+                            ret_ty: TypeOrPack::Type(Type::Named(NamedType {
+                                table: None,
+                                name: "number".to_string(),
+                                params: vec![]
+                            }))
+                        })))
+                    }],
+                    init: vec![Expr::Nil]
+                }),
+                vec![]
+            )]
+        }
+    );
+}
+
+#[test]
+fn test_type_function_bound_params() {
+    assert_parse!(
+        "local x: (a: string,b: string, c: string) -> number = nil",
+        Chunk {
+            block: Block { stmt_ptrs: vec![0] },
+            stmts: vec![StmtStatus::Some(
+                Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "x".to_string(),
+                        ty: Some(Type::Function(Box::new(FunctionType {
+                            generics: vec![],
+                            params: TypeList {
+                                types: vec![
+                                    Type::Bound(BoundType {
+                                        name: "a".to_string(),
+                                        ty: Box::new(Type::Named(NamedType {
+                                            table: None,
+                                            name: "string".to_string(),
+                                            params: vec![]
+                                        }))
+                                    }),
+                                    Type::Bound(BoundType {
+                                        name: "b".to_string(),
+                                        ty: Box::new(Type::Named(NamedType {
+                                            table: None,
+                                            name: "string".to_string(),
+                                            params: vec![]
+                                        }))
+                                    }),
+                                    Type::Bound(BoundType {
+                                        name: "c".to_string(),
+                                        ty: Box::new(Type::Named(NamedType {
+                                            table: None,
+                                            name: "string".to_string(),
+                                            params: vec![]
+                                        }))
+                                    }),
+                                ],
+                                vararg: None
+                            },
+                            ret_ty: TypeOrPack::Type(Type::Named(NamedType {
+                                table: None,
+                                name: "number".to_string(),
+                                params: vec![]
+                            }))
+                        })))
+                    }],
+                    init: vec![Expr::Nil]
+                }),
+                vec![]
+            )]
+        }
+    );
+}
+#[test]
+fn test_type_function_bound_params_some_unbound() {
+    assert_parse!(
+        "local x: (a: string, string, c: string) -> number = nil",
+        Chunk {
+            block: Block { stmt_ptrs: vec![0] },
+            stmts: vec![StmtStatus::Some(
+                Stmt::Local(Local {
+                    bindings: vec![Binding {
+                        name: "x".to_string(),
+                        ty: Some(Type::Function(Box::new(FunctionType {
+                            generics: vec![],
+                            params: TypeList {
+                                types: vec![
+                                    Type::Bound(BoundType {
+                                        name: "a".to_string(),
+                                        ty: Box::new(Type::Named(NamedType {
+                                            table: None,
+                                            name: "string".to_string(),
+                                            params: vec![]
+                                        }))
+                                    }),
+                                    Type::Named(NamedType {
+                                        table: None,
+                                        name: "string".to_string(),
+                                        params: vec![]
+                                    }),
+                                    Type::Bound(BoundType {
+                                        name: "c".to_string(),
+                                        ty: Box::new(Type::Named(NamedType {
+                                            table: None,
+                                            name: "string".to_string(),
+                                            params: vec![]
+                                        }))
+                                    }),
+                                ],
+                                vararg: None
+                            },
+                            ret_ty: TypeOrPack::Type(Type::Named(NamedType {
+                                table: None,
+                                name: "number".to_string(),
+                                params: vec![]
+                            }))
+                        })))
+                    }],
+                    init: vec![Expr::Nil]
+                }),
+                vec![]
+            )]
+        }
+    );
+}
+
+#[test]
 fn test_type_function_multi_arg() {
     assert_parse!(
         "local x: (string, string, string) -> nil = nil",

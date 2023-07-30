@@ -1381,17 +1381,37 @@ impl<'s, 'ts> Parser<'s> {
     ) -> Result<TypeList> {
         let cursor = &mut node.walk();
         let mut typelist = TypeList::default();
+
+        enum State<'ts> {
+            Init,
+            BoundFound(tree_sitter::Node<'ts>),
+        }
+
+        let mut state = State::Init;
+
         for child in node.children(cursor) {
             let kind = child.kind();
-            match kind {
-                "variadic" => {
+            println!("parse_type_list: {}", kind);
+            match (kind, &state) {
+                ("variadic", State::Init) => {
                     typelist.vararg = Some(
                         self.parse_type(child.child(1).ok_or_else(|| self.error(child))?, unp)?,
                     )
                 }
-                "(" | ")" | "->" | "," => {}
-                "comment" => self.parse_comment_tr(child),
-                _ => typelist.types.push(self.parse_type(child, unp)?),
+                ("(" | ")" | "->" | ",", State::Init) => {}
+                ("comment", _) => self.parse_comment_tr(child),
+                ("name", State::Init) => state = State::BoundFound(child),
+                (":", State::BoundFound(_)) => {}
+                (_, State::BoundFound(name)) => {
+                    let ty = self.parse_type(child, unp)?;
+                    let btype = BoundType {
+                        name: self.extract_text(*name).to_string(),
+                        ty: Box::new(ty),
+                    };
+                    typelist.types.push(Type::Bound(btype));
+                    state = State::Init;
+                }
+                (_, State::Init) => typelist.types.push(self.parse_type(child, unp)?),
             }
         }
         Ok(typelist)
