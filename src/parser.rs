@@ -991,7 +991,6 @@ impl<'s, 'ts> Parser<'s> {
                 ("comment", _) => self.parse_comment_tr(child),
                 (_, State::Type) => ty = Some(self.parse_type(child, unp)?),
                 _ => {
-                    eprintln!("parse_type_def, kind: {}", kind);
                     return Err(self.error(child));
                 }
             }
@@ -1319,14 +1318,7 @@ impl<'s, 'ts> Parser<'s> {
                 Ok(TypeOrPack::Type(self.parse_type(node, unp)?))
             }
             "typepack" => Ok(TypeOrPack::Pack(self.parse_type_pack(node, unp)?)),
-            _ => {
-                eprintln!(
-                    "TODO: parse_type_or_pack {}: {}",
-                    kind,
-                    self.extract_text(node)
-                );
-                Err(self.error(node))
-            }
+            _ => Err(self.error(node)),
         }
     }
 
@@ -1391,7 +1383,6 @@ impl<'s, 'ts> Parser<'s> {
 
         for child in node.children(cursor) {
             let kind = child.kind();
-            println!("parse_type_list: {}", kind);
             match (kind, &state) {
                 ("variadic", State::Init) => {
                     typelist.vararg = Some(
