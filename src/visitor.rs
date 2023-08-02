@@ -54,6 +54,25 @@ macro_rules! trait_visitor {
         fn visit_string_interp(&mut self, _state: &VisitorDriverState, _string_interp: $($ref)+ StringInterp) {}
         fn visit_type_assertion(&mut self, _state: &VisitorDriverState, _type_assertion: $($ref)+ TypeAssertion) {}
         fn visit_type_def(&mut self, _state: &VisitorDriverState, _type_def: $($ref)+ TypeDef) {}
+        fn visit_type(&mut self, _state: &VisitorDriverState, _type_: $($ref)+ Type) {}
+        fn visit_type_or_pack(&mut self, _state: &VisitorDriverState, _type_or_pack: $($ref)+ TypeOrPack) {}
+        fn visit_generic_param(&mut self, _state: &VisitorDriverState, _generic_param: $($ref)+ GenericParam) {}
+        fn visit_type_pack(&mut self, _state: &VisitorDriverState, _type_pack: $($ref)+ TypePack) {}
+        fn visit_type_list(&mut self, _state: &VisitorDriverState, _type_list: $($ref)+ TypeList) {}
+        fn visit_generic_def(&mut self, _state: &VisitorDriverState, _generic_def: $($ref)+ GenericDef) {}
+        fn visit_packed_type(&mut self, _state: &VisitorDriverState, _packed_type: $($ref)+ Type) {}
+        fn visit_type_of(&mut self, _state: &VisitorDriverState, _expr: $($ref)+ Expr) {}
+        fn visit_optional_type(&mut self, _state: &VisitorDriverState, _type_: $($ref)+ Type) {}
+        fn visit_nil_type(&mut self, _state: &VisitorDriverState) {}
+        fn visit_string_literal_type(&mut self, _state: &VisitorDriverState, _string: $($ref)+ str) {}
+        fn visit_bool_literal_type(&mut self, _state: &VisitorDriverState, _bool: $($ref)+ bool) {}
+        fn visit_named_type(&mut self, _state: &VisitorDriverState, _named: $($ref)+ NamedType) {}
+        fn visit_bound_type(&mut self, _state: &VisitorDriverState, _bound: $($ref)+ BoundType) {}
+        fn visit_table_type(&mut self, _state: &VisitorDriverState, _table_type: $($ref)+ TableType) {}
+        fn visit_function_type(&mut self, _state: &VisitorDriverState, _function_type: $($ref)+ FunctionType) {}
+        fn visit_union_type(&mut self, _state: &VisitorDriverState, _union_type: $($ref)+ UnionType) {}
+        fn visit_intersection_type(&mut self, _state: &VisitorDriverState, _intersection_type: $($ref)+ IntersectionType) {}
+        fn visit_table_property(&mut self, _state: &VisitorDriverState, _table_property: $($ref)+ TableProp) {}
     };
 }
 
@@ -169,7 +188,7 @@ macro_rules! impl_visitor_driver {
 
         fn drive_for(&mut self, for_: $($ref)+ For, unv: &mut UnvisitedStmts) {
             self.visitor.visit_for(&self.state,for_);
-            self.drive_binding($($ref)+ for_.var);
+            self.drive_binding($($ref)+ for_.var, unv);
             self.drive_expr($($ref)+ for_.start, unv);
             self.drive_expr($($ref)+ for_.end, unv);
             if let Some(step) = $($ref)+ for_.step {
@@ -181,7 +200,7 @@ macro_rules! impl_visitor_driver {
         fn drive_for_in(&mut self, for_in: $($ref)+ ForIn, unv: &mut UnvisitedStmts) {
             self.visitor.visit_for_in(&self.state,for_in);
             for v in $($ref)+ for_in.vars {
-                self.drive_binding(v);
+                self.drive_binding(v, unv);
             }
             for e in $($ref)+ for_in.exprs {
                 self.drive_expr(e, unv);
@@ -191,11 +210,20 @@ macro_rules! impl_visitor_driver {
 
         fn drive_function_body(&mut self, function_body: $($ref)+ FunctionBody, unv: &mut UnvisitedStmts) {
             self.visitor.visit_function_body(&self.state,function_body);
-            // TODO: traverse generics
-            for p in $($ref)+ function_body.params {
-                self.drive_binding(p);
+            for g in $($ref)+ function_body.generics {
+                self.drive_generic_param(g);
             }
-            // TODO: traverse ret type
+            for p in $($ref)+ function_body.params {
+                self.drive_binding(p, unv);
+            }
+            match $($ref)+ function_body.ret_ty {
+                Some(r) => self.drive_type_or_pack(r, unv),
+                None => {}
+            }
+            match $($ref)+ function_body.vararg {
+                Some(Some(ty)) => self.drive_type(ty, unv),
+                _ => {}
+            }
             self.drive_block($($ref)+ function_body.block, unv);
         }
 
@@ -216,7 +244,7 @@ macro_rules! impl_visitor_driver {
         fn drive_local(&mut self, local: $($ref)+ Local, unv: &mut UnvisitedStmts) {
             self.visitor.visit_local(&self.state,local);
             for b in $($ref)+ local.bindings {
-                self.drive_binding(b);
+                self.drive_binding(b, unv);
             }
             for e in $($ref)+ local.init {
                 self.drive_expr(e, unv);
@@ -268,9 +296,12 @@ macro_rules! impl_visitor_driver {
             self.drive_expr($($ref)+ field_access.expr, unv);
         }
 
-        fn drive_binding(&mut self, binding: $($ref)+ Binding) {
+        fn drive_binding(&mut self, binding: $($ref)+ Binding, unv: &mut UnvisitedStmts) {
             self.visitor.visit_binding(&self.state,binding);
-            // TODO: type traversal
+            match $($ref)+ binding.ty {
+                Some(ty) => self.drive_type(ty, unv),
+                None => {}
+            }
         }
 
         fn drive_table_constructor(
@@ -336,10 +367,157 @@ macro_rules! impl_visitor_driver {
         fn drive_type_assertion(&mut self, type_assertion: $($ref)+ TypeAssertion, unv: &mut UnvisitedStmts) {
             self.visitor.visit_type_assertion(&self.state,type_assertion);
             self.drive_expr($($ref)+ type_assertion.expr, unv);
+            self.drive_type($($ref)+ type_assertion.ty, unv);
         }
 
-        fn drive_type_def(&mut self, type_def: $($ref)+ TypeDef, _unv: &mut UnvisitedStmts) {
+        fn drive_type_def(&mut self, type_def: $($ref)+ TypeDef, unv: &mut UnvisitedStmts) {
             self.visitor.visit_type_def(&self.state,type_def);
+            for gen_def in $($ref)+ type_def.generics {
+                self.drive_generic_def(gen_def, unv);
+            }
+            self.drive_type($($ref)+ type_def.ty, unv);
+        }
+
+        fn drive_type(&mut self, ty: $($ref)+ Type, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_type(&self.state, ty);
+            stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+                match ty {
+                    Type::Pack(ty) => {
+                        self.visitor.visit_packed_type(&self.state, ty);
+                        self.drive_type(ty, unv);
+                    },
+                    Type::TypeOf(exp) => {
+                        self.visitor.visit_type_of(&self.state, exp);
+                        self.drive_expr(exp, unv);
+                    },
+                    Type::Named(named_type) => {
+                        self.drive_named_type(named_type, unv);
+                    },
+                    Type::Bound(bound_type) => {
+                        self.drive_bound_type(bound_type, unv);
+                    }
+                    Type::Table(table_type) => {
+                        self.drive_table_type(table_type, unv);
+                    }
+                    Type::Function(fn_type) => {
+                        self.drive_function_type(fn_type, unv);
+                    }
+                    Type::Optional(ty) => {
+                        self.visitor.visit_optional_type(&self.state, ty);
+                        self.drive_type(ty, unv);
+                    }
+                    Type::Union(union_type) => {
+                        self.drive_union_type(union_type, unv);
+                    }
+                    Type::Intersection(intersection_type) => {
+                        self.drive_intersection_type(intersection_type, unv);
+                    }
+                    Type::Nil => {
+                        self.visitor.visit_nil_type(&self.state);
+                    }
+                    Type::String(string) => {
+                        self.visitor.visit_string_literal_type(&self.state, string);
+                    }
+                    Type::Bool(b) => {
+                        self.visitor.visit_bool_literal_type(&self.state, b);
+                    }
+                }
+            });
+        }
+
+        fn drive_named_type(&mut self, named_type: $($ref)+ NamedType, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_named_type(&self.state, named_type);
+            for param in $($ref)+ named_type.params {
+                self.drive_type_or_pack(param, unv);
+            }
+        }
+
+        fn drive_bound_type(&mut self, bound_type: $($ref)+ BoundType, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_bound_type(&self.state, bound_type);
+            self.drive_type($($ref)+ bound_type.ty, unv);
+        }
+
+        fn drive_table_property(&mut self, prop: $($ref)+ TableProp, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_table_property(&self.state, prop);
+            match prop {
+                TableProp::Indexer { key, value } => {
+                    self.drive_type(key, unv);
+                    self.drive_type(value, unv);
+                },
+                TableProp::Prop { key: _, value } => {
+                    self.drive_type(value, unv);
+                },
+                TableProp::Array(ty) => self.drive_type(ty, unv),
+            }
+        }
+
+        fn drive_table_type(&mut self, table_type: $($ref)+ TableType, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_table_type(&self.state, table_type);
+            for prop in $($ref)+ table_type.props {
+                self.drive_table_property(prop, unv);
+            }
+        }
+
+        fn drive_function_type(&mut self, fn_type: $($ref)+ FunctionType, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_function_type(&self.state, fn_type);
+            for generic in $($ref)+ fn_type.generics {
+                self.drive_generic_param(generic);
+            }
+            self.drive_type_list($($ref)+ fn_type.params, unv);
+            self.drive_type_or_pack($($ref)+ fn_type.ret_ty, unv);
+        }
+
+        fn drive_union_type(&mut self, union_type: $($ref)+ UnionType, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_union_type(&self.state, union_type);
+            self.drive_type($($ref)+ union_type.left, unv);
+            self.drive_type($($ref)+ union_type.right, unv);
+        }
+
+        fn drive_intersection_type(&mut self, intersection_type: $($ref)+ IntersectionType, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_intersection_type(&self.state, intersection_type);
+            self.drive_type($($ref)+ intersection_type.left, unv);
+            self.drive_type($($ref)+ intersection_type.right, unv);
+        }
+
+        fn drive_generic_param(&mut self, generic_params: $($ref)+ GenericParam) {
+            self.visitor.visit_generic_param(&self.state,generic_params);
+        }
+
+        fn drive_type_pack(&mut self, type_pack: $($ref)+ TypePack, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_type_pack(&self.state, type_pack);
+            match type_pack {
+                TypePack::Listed(listed) => self.drive_type_list(listed, unv),
+                TypePack::Generic(ty) |
+                TypePack::Variadic(ty) => self.drive_type(ty, unv),
+            }
+        }
+
+        fn drive_type_or_pack(&mut self, type_or_pack: $($ref)+ TypeOrPack, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_type_or_pack(&self.state,type_or_pack);
+            match type_or_pack {
+                TypeOrPack::Type(ty) => self.drive_type(ty, unv),
+                TypeOrPack::Pack(pack) => self.drive_type_pack(pack, unv),
+            }
+        }
+
+        fn drive_type_list(&mut self, type_list: $($ref)+ TypeList, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_type_list(&self.state,type_list);
+            for ty in $($ref)+ type_list.types {
+                self.drive_type(ty, unv);
+            }
+            match $($ref)+ type_list.vararg {
+                Some(ty) => self.drive_type(ty, unv),
+                None => {}
+            }
+        }
+
+        fn drive_generic_def(&mut self, generic_def: $($ref)+ GenericDef, unv: &mut UnvisitedStmts) {
+            self.visitor.visit_generic_def(&self.state,generic_def);
+            self.drive_generic_param($($ref)+ generic_def.param);
+            match $($ref)+ generic_def.default {
+                Some(ty) => self.drive_type_or_pack(ty, unv),
+                None => {}
+            }
         }
     };
 }
