@@ -10,7 +10,6 @@ type UnvisitedStmts = VecDeque<(
     usize, // unvisited stmt ptr
 )>;
 
-// TODO: add visitors for types
 macro_rules! trait_visitor {
     // ref is a tt if it's &, but it's two tts if it's &mut
     ($chunk_gen:ident, $($ref:tt)+) => {

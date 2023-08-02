@@ -32,5 +32,5 @@ All the files are processed in only a few minutes, which shows how fast this par
 
 - AST [COMPLETE]
 - Parser [COMPLETE]
-- AST Traversal through visitors [Lua5.1 is complete, Luau is still WIP]
+- AST Traversal through visitors [COMPLETE]
 - Pretty-printing [NOT STARTED]
