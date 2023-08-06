@@ -19,7 +19,8 @@ pretty-printing and AST traversal utilities.
    The visitors use the same queue and recursion strategy, so they're also very fast.
 3. It includes comments, although these are only decorated to statements, not expressions.
 4. The AST is stored in an arena-like structure, so it's very compact in memory, and can be easily
-   serialized and deserialized without huge overhead.
+   serialized and deserialized without huge overhead. See [this blog post](https://www.cs.cornell.edu/~asampson/blog/flattening.html) by Prof. Adrian Sampson
+   on how this little change can drastically improve performance.
 
 ## Example Usage
 
